@@ -1,5 +1,5 @@
 {
-  "name": "skill-vault",
+  "name": "@jcorpac/skill-vault",
   "version": "1.0.0",
   "description": "Universal Agent Skill Router, Lifecycle Manager, and Tiered Storage Engine for AI Coding Agents.",
   "main": "bin/cli.js",

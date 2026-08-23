@@ -2,7 +2,7 @@
 
 [![CI Test Suite](https://github.com/jcorpac/skill-vault/actions/workflows/test.yml/badge.svg)](https://github.com/jcorpac/skill-vault/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![npm version](https://img.shields.io/npm/v/skill-vault.svg)](https://www.npmjs.com/package/skill-vault)
+[![npm version](https://img.shields.io/npm/v/@jcorpac/skill-vault.svg)](https://www.npmjs.com/package/@jcorpac/skill-vault)
 [![Agent Skills](https://img.shields.io/badge/Agent%20Skills-Standard-green.svg)](SKILL.md)
 
 > **Universal Agent Skill Router, Lifecycle Manager & Tiered Storage Engine for AI Coding Agents.**
@@ -37,9 +37,11 @@ As teams collect specialized skills (database admin, cloud deployment, bioinform
      - managing-python-deps         - gcp-composer-troubleshoot
                                     - alphafold-protein-analysis
                │                               ▲
-               │  npx skill-vault archive      │
+               │  npx @jcorpac/skill-vault     │
+               │  archive                      │
                ├──────────────────────────────►│
-               │  npx skill-vault restore      │
+               │  npx @jcorpac/skill-vault     │
+               │  restore                      │
                │◄──────────────────────────────┤
 ```
 
@@ -50,13 +52,13 @@ As teams collect specialized skills (database admin, cloud deployment, bioinform
 ### Option 1: Run via `npx` (Zero Installation)
 ```bash
 # Initialize a repository for skill storage
-npx skill-vault init
+npx @jcorpac/skill-vault init
 
 # Search indexed skills
-npx skill-vault search "database"
+npx @jcorpac/skill-vault search "database"
 
 # Verify archive integrity
-npx skill-vault verify --fix
+npx @jcorpac/skill-vault verify --fix
 ```
 
 ### Option 2: Install as an Agent Skill
