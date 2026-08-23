@@ -1,6 +1,6 @@
 # Skill Vault 🛡️
 
-[![CI Test Suite](https://github.com/your-username/skill-vault/actions/workflows/test.yml/badge.svg)](https://github.com/your-username/skill-vault/actions)
+[![CI Test Suite](https://github.com/jcorpac/skill-vault/actions/workflows/test.yml/badge.svg)](https://github.com/jcorpac/skill-vault/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![npm version](https://img.shields.io/npm/v/skill-vault.svg)](https://www.npmjs.com/package/skill-vault)
 [![Agent Skills](https://img.shields.io/badge/Agent%20Skills-Standard-green.svg)](SKILL.md)
@@ -62,7 +62,7 @@ npx skill-vault verify --fix
 ### Option 2: Install as an Agent Skill
 Install directly into Claude Code, Antigravity, or Cursor:
 ```bash
-npx skills add your-username/skill-vault
+npx skills add jcorpac/skill-vault
 ```
 
 ### Option 3: Use with Python CLI (Pure Standard Library)

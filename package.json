@@ -29,14 +29,14 @@
     "context-optimization",
     "llm-tools"
   ],
-  "author": "Skill Vault Contributors",
+  "author": "jcorpac",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-username/skill-vault.git"
+    "url": "https://github.com/jcorpac/skill-vault.git"
   },
   "bugs": {
-    "url": "https://github.com/your-username/skill-vault/issues"
+    "url": "https://github.com/jcorpac/skill-vault/issues"
   },
-  "homepage": "https://github.com/your-username/skill-vault#readme"
+  "homepage": "https://github.com/jcorpac/skill-vault#readme"
 }
