@@ -1,0 +1,42 @@
+{
+  "name": "skill-vault",
+  "version": "1.0.0",
+  "description": "Universal Agent Skill Router, Lifecycle Manager, and Tiered Storage Engine for AI Coding Agents.",
+  "main": "bin/cli.js",
+  "bin": {
+    "skill-vault": "./bin/cli.js",
+    "skillvault": "./bin/cli.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "SKILL.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "python -m unittest discover -s tests -v",
+    "verify": "node bin/cli.js verify"
+  },
+  "keywords": [
+    "agent-skills",
+    "ai-agents",
+    "antigravity",
+    "claude-code",
+    "cursor",
+    "skill-router",
+    "skill-vault",
+    "context-optimization",
+    "llm-tools"
+  ],
+  "author": "Skill Vault Contributors",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/skill-vault.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-username/skill-vault/issues"
+  },
+  "homepage": "https://github.com/your-username/skill-vault#readme"
+}
