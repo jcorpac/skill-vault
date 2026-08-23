@@ -5,13 +5,14 @@ Runs in an isolated sandbox without modifying real user skills or archives.
 Validates:
 1. Path resolution across environments
 2. Workspace bootstrapping (init)
-3. Archiving with LLM categories & preservation of SKILL.md
-4. Restoring skills (single, pattern, category, overwrite)
-5. Recategorization in manifest & index
-6. Reindexing & relative link generation
-7. Search matching
-8. Bi-directional integrity audit & self-healing (--fix)
-9. CLI command execution
+3. Presenting active and archived skills (list & status)
+4. Archiving with LLM categories & preservation of SKILL.md
+5. Restoring skills (single, pattern, category, overwrite)
+6. Recategorization in manifest & index
+7. Reindexing & relative link generation
+8. Search matching
+9. Bi-directional integrity audit & self-healing (--fix)
+10. CLI command execution
 """
 
 import io
@@ -92,13 +93,34 @@ class TestSkillVault(unittest.TestCase):
         finally:
             empty_sandbox.cleanup()
 
-    # --- 2. Archive Tests ---
+    # --- 2. List & Status Presentation Tests ---
+
+    def test_list_and_status_skills(self):
+        """Test listing active and archived skills and status summary."""
+        self._create_mock_skill(self.skills_dir, "active-skill-1", "Active skill description.")
+        self._create_mock_skill(self.skills_dir, "archived-skill-1", "Archived skill description.")
+        self.mgr.archive(name="archived-skill-1", category="Analytics")
+
+        # Capture output of list
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            self.mgr.list_skills(show_active=True, show_archived=True)
+            output = sys.stdout.getvalue()
+            self.assertIn("L1 ACTIVE SKILLS", output)
+            self.assertIn("active-skill-1", output)
+            self.assertIn("L2 ARCHIVED SKILLS", output)
+            self.assertIn("archived-skill-1", output)
+            self.assertIn("[Analytics]", output)
+        finally:
+            sys.stdout = old_stdout
+
+    # --- 3. Archive Tests ---
 
     def test_archive_single_skill_with_category(self):
         """Test archiving a single active skill with category."""
         self._create_mock_skill(self.skills_dir, "cloud-sql-backup", "Manages database backups.")
         
-        # Archive skill
         self.mgr.archive(name="cloud-sql-backup", category="Cloud Database")
 
         # 1. Verify removed from active skills
@@ -137,7 +159,7 @@ class TestSkillVault(unittest.TestCase):
         self.assertTrue((self.archive_dir / "skills" / "gcp-pubsub").exists())
         self.assertFalse((self.archive_dir / "skills" / "aws-s3").exists())
 
-    # --- 3. Recategorize Tests ---
+    # --- 4. Recategorize Tests ---
 
     def test_recategorize_skill(self):
         """Test updating a category without touching SKILL.md."""
@@ -153,7 +175,7 @@ class TestSkillVault(unittest.TestCase):
         self.assertIn("## Data Engineering (1 skills)", index_content)
         self.assertNotIn("Initial Category", index_content)
 
-    # --- 4. Restore Tests ---
+    # --- 5. Restore Tests ---
 
     def test_restore_single_and_category(self):
         """Test restoring archived skills back to active locations."""
@@ -173,7 +195,7 @@ class TestSkillVault(unittest.TestCase):
         self.mgr.restore(category="Data Warehouse")
         self.assertTrue((self.skills_dir / "bigquery-partitioning" / "SKILL.md").exists())
 
-    # --- 5. Search Tests ---
+    # --- 6. Search Tests ---
 
     def test_search_skills(self):
         """Test keyword searching in names, descriptions, and categories."""
@@ -190,7 +212,7 @@ class TestSkillVault(unittest.TestCase):
         finally:
             sys.stdout = old_stdout
 
-    # --- 6. Integrity Verification & Self-Healing Tests ---
+    # --- 7. Integrity Verification & Self-Healing Tests ---
 
     def test_integrity_audit_clean(self):
         """Test verify returns 0 when archive is in 100% sync."""
@@ -233,7 +255,7 @@ class TestSkillVault(unittest.TestCase):
         self.assertIn("unindexed-skill", names)
         self.assertIn("skill-valid", names)
 
-    # --- 7. End-to-End CLI Invocation Test ---
+    # --- 8. End-to-End CLI Invocation Test ---
 
     def test_cli_execution(self):
         """Test running skill_vault.py directly via subprocess CLI."""
@@ -249,6 +271,15 @@ class TestSkillVault(unittest.TestCase):
         )
         self.assertEqual(res.returncode, 0)
         self.assertIn("[Archived]", res.stdout)
+
+        # List via CLI
+        res_list = subprocess.run(
+            [sys.executable, str(script_path), "--base-dir", str(self.base_dir), "list"],
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(res_list.returncode, 0)
+        self.assertIn("cli-test-skill", res_list.stdout)
 
         # Verify via CLI
         res_verify = subprocess.run(

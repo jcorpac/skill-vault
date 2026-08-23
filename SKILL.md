@@ -82,12 +82,31 @@ To rebuild `INDEX.md` and ensure all paths and category sections are synchronize
 python scripts/skill_vault.py reindex
 ```
 
-### E. Skill Discovery & Keyword Search
+### E. Presenting Skills & Tier Status
+To get a rapid overview of what skills are currently in active context memory (L1) vs. cold storage (L2):
+```bash
+# Full overview of active and archived skills
+python scripts/skill_vault.py list
+
+# Quick breakdown of counts and categories
+python scripts/skill_vault.py status
+
+# List only active skills in context
+python scripts/skill_vault.py list --active
+
+# List archived skills in a specific category
+python scripts/skill_vault.py list --archived --category "Cloud SQL"
+
+# Output structured JSON (for scripts/dashboards)
+python scripts/skill_vault.py list --json
+```
+
+### F. Skill Discovery & Keyword Search
 ```bash
 python scripts/skill_vault.py search "<keyword>"
 ```
 
-### F. Archive Integrity Audit & Self-Healing
+### G. Archive Integrity Audit & Self-Healing
 To confirm bi-directional consistency across disk folders, `backup_manifest.json`, and `INDEX.md`:
 ```bash
 # Run integrity verification audit

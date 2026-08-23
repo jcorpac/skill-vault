@@ -71,8 +71,8 @@ class SkillVault:
         if not self.index_file.exists():
             self.index_file.write_text("# Skill Archive Index\n\nTotal Archived Skills: 0\n", encoding="utf-8")
         print(f"[Initialized] Skill Vault initialized at: {self.base_dir}")
-        print(f"  • Active skills:  {self.skills_dir}")
-        print(f"  • Archive store:  {self.archive_dir}")
+        print(f"  * Active skills:  {self.skills_dir}")
+        print(f"  * Archive store:  {self.archive_dir}")
 
     def get_active_skill_dirs(self):
         """Discover active skill directories."""
@@ -91,6 +91,22 @@ class SkillVault:
                 if p.is_dir() and (p / "skills").exists():
                     dirs.append(p / "skills")
         return dirs
+
+    def get_active_skills(self):
+        """Discover all currently active skills on disk."""
+        active = {}
+        for search_dir in self.get_active_skill_dirs():
+            if search_dir.exists():
+                for folder in search_dir.iterdir():
+                    if folder.is_dir() and (folder / "SKILL.md").exists():
+                        desc = self.parse_skill_description(folder / "SKILL.md")
+                        active[folder.name] = {
+                            "name": folder.name,
+                            "path": str(folder),
+                            "relative_path": self.make_portable_path(folder),
+                            "description": desc,
+                        }
+        return active
 
     def get_archived_skill_folders(self):
         """Discover all skill folders physically present in the archive directory."""
@@ -215,6 +231,96 @@ class SkillVault:
         return indexed_skills
 
     # --- Actions ---
+
+    def list_skills(self, show_active=True, show_archived=True, category_filter=None, as_json=False, summary_only=False):
+        """Present active and archived skills in structured, human-readable or JSON formats."""
+        active_map = self.get_active_skills() if show_active else {}
+        manifest = self.load_manifest() if show_archived else []
+
+        # Filter manifest by category if requested
+        if category_filter and show_archived:
+            manifest = [m for m in manifest if m.get("category", "").lower() == category_filter.lower()]
+
+        # Group archived by category
+        archived_by_cat = {}
+        for item in manifest:
+            cat = item.get("category", "General & Utility Skills")
+            archived_path = self.resolve_portable_path(item["archived_path"])
+            skill_md = archived_path / "SKILL.md"
+            desc = self.parse_skill_description(skill_md)
+            archived_by_cat.setdefault(cat, []).append({
+                "name": item["name"],
+                "path": str(archived_path),
+                "relative_path": item["archived_path"],
+                "description": desc,
+            })
+
+        if as_json:
+            result = {}
+            if show_active:
+                result["active"] = list(active_map.values())
+            if show_archived:
+                result["archived"] = archived_by_cat
+                result["archived_total"] = len(manifest)
+            print(json.dumps(result, indent=2))
+            return
+
+        print("==================================================")
+        print("                 SKILL VAULT OVERVIEW")
+        print(f"  Base Directory: {self.base_dir}")
+        print("==================================================\n")
+
+        # Summary Header
+        total_active = len(active_map)
+        total_archived = len(manifest)
+        total_categories = len(archived_by_cat)
+
+        print("Storage Tier Summary:")
+        if show_active:
+            print(f"  * L1 Active Context Memory:  {total_active} skill(s)")
+        if show_archived:
+            print(f"  * L2 Cold Storage Archive:   {total_archived} skill(s) across {total_categories} categories")
+        print("")
+
+        if summary_only:
+            if show_archived and archived_by_cat:
+                print("Archived Categories Breakdown:")
+                for cat, skills in sorted(archived_by_cat.items()):
+                    print(f"  - {cat}: {len(skills)} skill(s)")
+                print("")
+            return
+
+        # 1. Present Active Skills
+        if show_active:
+            print("--------------------------------------------------")
+            print(f"  [L1 ACTIVE SKILLS] ({total_active} in context)")
+            print("--------------------------------------------------")
+            if not active_map:
+                print("  (No active skills found. Use 'restore' to mount skills from archive.)\n")
+            else:
+                for name, data in sorted(active_map.items()):
+                    desc = data["description"]
+                    desc_snippet = desc[:110] + "..." if len(desc) > 110 else desc
+                    print(f"  * {name}")
+                    print(f"    Desc: {desc_snippet}")
+                    print(f"    Path: {data['relative_path']}")
+                print("")
+
+        # 2. Present Archived Skills
+        if show_archived:
+            print("--------------------------------------------------")
+            print(f"  [L2 ARCHIVED SKILLS] ({total_archived} in vault)")
+            print("--------------------------------------------------")
+            if not archived_by_cat:
+                print("  (No archived skills found.)\n")
+            else:
+                for cat, skills in sorted(archived_by_cat.items()):
+                    print(f"\n  [{cat}] ({len(skills)} skills):")
+                    for s in sorted(skills, key=lambda x: x["name"].lower()):
+                        desc = s["description"]
+                        desc_snippet = desc[:110] + "..." if len(desc) > 110 else desc
+                        print(f"    * {s['name']}: {desc_snippet}")
+                print("")
 
     def archive(self, name=None, pattern=None, category=None, keep_active=False):
         """Archive active skills with an assigned category."""
@@ -539,6 +645,18 @@ def main():
     # Init
     p_init = subparsers.add_parser("init", help="Bootstrap standard skill directory structure in workspace")
 
+    # List / Overview
+    p_list = subparsers.add_parser("list", help="Present active and archived skills")
+    p_list.add_argument("-a", "--active", action="store_true", help="List only active skills (L1 Context)")
+    p_list.add_argument("-c", "--archived", action="store_true", help="List only archived skills (L2 Vault)")
+    p_list.add_argument("--category", help="Filter by category")
+    p_list.add_argument("--summary", action="store_true", help="Show compact category summary")
+    p_list.add_argument("--json", action="store_true", help="Output in structured JSON format")
+
+    # Status (alias for list --summary)
+    p_stat = subparsers.add_parser("status", help="Show summary of active and archived skills")
+    p_stat.add_argument("--json", action="store_true", help="Output in structured JSON format")
+
     # Archive
     p_arch = subparsers.add_parser("archive", help="Archive active skills into cold storage")
     p_arch.add_argument("name", nargs="?", help="Specific skill name")
@@ -575,6 +693,23 @@ def main():
 
     if args.command == "init":
         mgr.init()
+    elif args.command == "list":
+        show_active = not args.archived or args.active
+        show_archived = not args.active or args.archived
+        mgr.list_skills(
+            show_active=show_active,
+            show_archived=show_archived,
+            category_filter=args.category,
+            as_json=args.json,
+            summary_only=args.summary,
+        )
+    elif args.command == "status":
+        mgr.list_skills(
+            show_active=True,
+            show_archived=True,
+            as_json=args.json,
+            summary_only=True,
+        )
     elif args.command == "archive":
         mgr.archive(name=args.name, pattern=args.pattern, category=args.category, keep_active=args.keep_active)
     elif args.command == "recategorize":

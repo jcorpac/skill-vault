@@ -79,6 +79,10 @@ python scripts/skill_vault.py verify
 | Command | Description |
 | :--- | :--- |
 | `skill-vault init` | Bootstrap standard skill and archive folders in workspace. |
+| `skill-vault list` | Present all active skills (L1) and archived skills (L2). |
+| `skill-vault status` | Fast summary of skill counts and category breakdown. |
+| `skill-vault list --active` | List only active skills currently loaded in context memory. |
+| `skill-vault list --archived` | List only cold-storage skills grouped by category. |
 | `skill-vault archive <name> --category "<Cat>"` | Move active skill to archive with category metadata. |
 | `skill-vault archive --pattern "gcp-*"` | Archive multiple matching skills via glob pattern. |
 | `skill-vault recategorize <name> "<New Cat>"` | Reorganize skill category without modifying `SKILL.md`. |
