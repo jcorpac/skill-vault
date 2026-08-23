@@ -4,8 +4,8 @@
   "description": "Universal Agent Skill Router, Lifecycle Manager, and Tiered Storage Engine for AI Coding Agents.",
   "main": "bin/cli.js",
   "bin": {
-    "skill-vault": "./bin/cli.js",
-    "skillvault": "./bin/cli.js"
+    "skill-vault": "bin/cli.js",
+    "skillvault": "bin/cli.js"
   },
   "files": [
     "bin/",
@@ -33,7 +33,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jcorpac/skill-vault.git"
+    "url": "git+https://github.com/jcorpac/skill-vault.git"
   },
   "bugs": {
     "url": "https://github.com/jcorpac/skill-vault/issues"
