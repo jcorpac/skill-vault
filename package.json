@@ -1,6 +1,6 @@
 {
   "name": "@jcorpac/skill-vault",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Universal Agent Skill Router, Lifecycle Manager, and Tiered Storage Engine for AI Coding Agents.",
   "main": "bin/cli.js",
   "bin": {
@@ -9,7 +9,7 @@
   },
   "files": [
     "bin/",
-    "scripts/",
+    "scripts/skill_vault.py",
     "SKILL.md",
     "README.md",
     "LICENSE"
