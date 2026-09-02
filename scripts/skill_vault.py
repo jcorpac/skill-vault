@@ -15,6 +15,58 @@ import re
 import shutil
 import sys
 
+# Default Core Foundation Skills that are protected from auto-archiving
+DEFAULT_CORE_SKILLS = {
+    "skill-vault",
+    "accidental-data-loss-prevention",
+    "managing-python-dependencies",
+    "find-skills",
+    "skill-repair",
+}
+
+# Workspace fingerprint signatures mapping to skill categories
+WORKSPACE_FINGERPRINTS = {
+    "BigQuery & Data Warehouse": [
+        "dbt_project.yml",
+        "dataform.json",
+        "bigquery.json",
+        "*.sql",
+    ],
+    "GCP & Data Engineering": [
+        "dags",
+        "airflow.cfg",
+        "cloudbuild.yaml",
+        "cloudbuild.json",
+        "*.tf",
+        "Dockerfile",
+    ],
+    "AlloyDB": [
+        "alembic.ini",
+        "alloydb.json",
+    ],
+    "Cloud SQL": [
+        "cloudsql.json",
+    ],
+    "Science & Biomedicine": [
+        "*.pdb",
+        "*.fasta",
+        "*.fa",
+        "*.cif",
+        "*.vcf",
+        "*.bam",
+    ],
+    "Gemini API & AI Agents": [
+        "agent.py",
+        "evals.py",
+        "gemini.json",
+    ],
+    "Android Development": [
+        "build.gradle",
+        "build.gradle.kts",
+        "AndroidManifest.xml",
+    ],
+}
+
 
 def resolve_base_dir(cli_base=None):
     """Dynamically resolve the base directory for skills and archives."""
@@ -230,6 +282,113 @@ class SkillVault:
 
         return indexed_skills
 
+    # --- Workspace & Optimization Engine ---
+
+    def detect_workspace_categories(self, workspace_path=None):
+        """Inspect workspace files and return matched skill categories."""
+        target_ws = Path(workspace_path).resolve() if workspace_path else Path.cwd().resolve()
+        matched = {}
+
+        for category, patterns in WORKSPACE_FINGERPRINTS.items():
+            for pat in patterns:
+                if "*" in pat:
+                    matches = list(target_ws.glob(pat)) + list(target_ws.glob(f"**/{pat}"))[:5]
+                    if matches:
+                        matched.setdefault(category, []).append(pat)
+                        break
+                else:
+                    if (target_ws / pat).exists() or list(target_ws.glob(f"**/{pat}"))[:1]:
+                        matched.setdefault(category, []).append(pat)
+                        break
+
+        return matched
+
+    def optimize(self, workspace_path=None, protected_skills=None, dry_run=False):
+        """Automatically minimize active skills to essential Core + workspace-relevant skills.
+        
+        Archives unneeded active skills into cold storage and mounts matching domain skills.
+        """
+        target_ws = Path(workspace_path).resolve() if workspace_path else Path.cwd().resolve()
+        core_set = set(DEFAULT_CORE_SKILLS)
+        if protected_skills:
+            core_set.update(protected_skills)
+
+        print("==================================================")
+        print("          SKILL VAULT AUTO-OPTIMIZATION")
+        print(f"  Target Workspace: {target_ws}")
+        print("==================================================\n")
+
+        # 1. Detect workspace domain
+        detected_categories = self.detect_workspace_categories(target_ws)
+        if detected_categories:
+            print("Detected Tech Stack & Fingerprints:")
+            for cat, sigs in detected_categories.items():
+                print(f"  * {cat} (matched: {', '.join(sigs)})")
+        else:
+            print("Detected Tech Stack: Generic / Multi-purpose (Only Core Foundation Skills required)")
+        print("")
+
+        # 2. Inspect active skills vs vault
+        active_map = self.get_active_skills()
+        manifest = self.load_manifest()
+        manifest_by_name = {m["name"]: m for m in manifest}
+
+        to_archive = []
+        to_keep = []
+
+        for name, data in active_map.items():
+            if name in core_set:
+                to_keep.append((name, "Core Foundation Skill"))
+            else:
+                skill_cat = manifest_by_name.get(name, {}).get("category", "General & Utility Skills")
+                if skill_cat in detected_categories:
+                    to_keep.append((name, f"Matched Stack ({skill_cat})"))
+                else:
+                    to_archive.append((name, skill_cat))
+
+        # 3. Determine skills in vault that should be mounted
+        to_mount = []
+        for cat in detected_categories.keys():
+            for item in manifest:
+                if item.get("category") == cat and item["name"] not in active_map:
+                    to_mount.append((item["name"], cat))
+
+        # Output Plan
+        print(f"Active Skills Action Plan:")
+        print(f"  * Retained in Context ({len(to_keep)} skills):")
+        for name, reason in to_keep:
+            print(f"    [KEEP] {name} - {reason}")
+
+        if to_archive:
+            print(f"\n  * Evicting to Cold Storage Archive ({len(to_archive)} skills):")
+            for name, cat in to_archive:
+                print(f"    [ARCHIVE] {name} ({cat})")
+        else:
+            print("\n  * Evictions: None needed (Context is already minimal).")
+
+        if to_mount:
+            print(f"\n  * Mounting from Vault ({len(to_mount)} skills):")
+            for name, cat in to_mount:
+                print(f"    [MOUNT] {name} ({cat})")
+
+        if dry_run:
+            print("\n[Dry Run] Optimization preview complete. No files were moved.")
+            return
+
+        # Execute Evictions (Archive)
+        if to_archive:
+            print("\nExecuting Auto-Archival...")
+            for name, cat in to_archive:
+                self.archive(name=name, category=cat, keep_active=False)
+
+        # Execute Mounts (Restore)
+        if to_mount:
+            print("\nExecuting Auto-Mounts...")
+            for name, cat in to_mount:
+                self.restore(name=name)
+
+        print("\n[OK] Optimization complete! Active context surface is at absolute minimum.")
+
     # --- Actions ---
 
     def list_skills(self, show_active=True, show_archived=True, category_filter=None, as_json=False, summary_only=False):
@@ -237,11 +396,9 @@ class SkillVault:
         active_map = self.get_active_skills() if show_active else {}
         manifest = self.load_manifest() if show_archived else []
 
-        # Filter manifest by category if requested
         if category_filter and show_archived:
             manifest = [m for m in manifest if m.get("category", "").lower() == category_filter.lower()]
 
-        # Group archived by category
         archived_by_cat = {}
         for item in manifest:
             cat = item.get("category", "General & Utility Skills")
@@ -270,7 +427,6 @@ class SkillVault:
         print(f"  Base Directory: {self.base_dir}")
         print("==================================================\n")
 
-        # Summary Header
         total_active = len(active_map)
         total_archived = len(manifest)
         total_categories = len(archived_by_cat)
@@ -290,7 +446,6 @@ class SkillVault:
                 print("")
             return
 
-        # 1. Present Active Skills
         if show_active:
             print("--------------------------------------------------")
             print(f"  [L1 ACTIVE SKILLS] ({total_active} in context)")
@@ -306,7 +461,6 @@ class SkillVault:
                     print(f"    Path: {data['relative_path']}")
                 print("")
 
-        # 2. Present Archived Skills
         if show_archived:
             print("--------------------------------------------------")
             print(f"  [L2 ARCHIVED SKILLS] ({total_archived} in vault)")
@@ -450,7 +604,6 @@ class SkillVault:
                         "archived_path": self.make_portable_path(archived_path),
                     }
 
-        # Discover all archive directories physically on disk
         disk_skills = self.get_archived_skill_folders()
         for name, data in disk_skills.items():
             if data["has_skill_md"] and name not in manifest_by_folder:
@@ -461,7 +614,6 @@ class SkillVault:
                     "archived_path": self.make_portable_path(data["folder"]),
                 }
 
-        # Group by category
         categories = {}
         for name, item in manifest_by_folder.items():
             cat = item.get("category") or "General & Utility Skills"
@@ -514,14 +666,12 @@ class SkillVault:
         issues = []
         warnings = []
 
-        # 1. Check Disk Skill Folders
         for name, d in disk_skills.items():
             if not d["has_skill_md"]:
                 issues.append(f"[Disk Error] Folder '{name}' in archive is missing SKILL.md")
             elif d["size"] == 0:
                 issues.append(f"[Disk Error] SKILL.md in '{name}' is 0 bytes (empty file)")
 
-        # 2. Check Disk vs Manifest
         disk_names = set(disk_skills.keys())
         manifest_names = set(manifest_map.keys())
 
@@ -535,7 +685,6 @@ class SkillVault:
             for name in sorted(phantom_manifest):
                 issues.append(f"[Phantom Manifest Entry] '{name}' listed in backup_manifest.json but NOT found on disk")
 
-        # 3. Check Manifest Path Integrity
         for item in manifest:
             name = item["name"]
             archived_path = self.resolve_portable_path(item.get("archived_path", ""))
@@ -547,7 +696,6 @@ class SkillVault:
             if not item.get("category"):
                 warnings.append(f"[Missing Category] '{name}' in manifest has no category assigned")
 
-        # 4. Check Disk vs INDEX.md
         index_names = set(indexed_skills.keys())
         unindexed_disk = disk_names - index_names
         if unindexed_disk:
@@ -559,13 +707,11 @@ class SkillVault:
             for name in sorted(phantom_index):
                 issues.append(f"[Phantom Index Entry] '{name}' listed in INDEX.md but does NOT exist on disk")
 
-        # 5. Check INDEX.md vs Manifest
         unindexed_manifest = manifest_names - index_names
         if unindexed_manifest:
             for name in sorted(unindexed_manifest):
                 issues.append(f"[Manifest/Index Mismatch] '{name}' is in backup_manifest.json but NOT in INDEX.md")
 
-        # 6. Check INDEX.md Link Validity
         for name, data in indexed_skills.items():
             link_path_str = data.get("link_path")
             if link_path_str:
@@ -576,7 +722,6 @@ class SkillVault:
                     if not target_file.exists():
                         issues.append(f"[Broken Index Link] '{name}' link target missing: {target_file}")
 
-        # Summary Metrics
         print("Component Counts:")
         print(f"  * Physical Folders on Disk:        {len(disk_skills)}")
         print(f"  * Entries in backup_manifest.json: {len(manifest)}")
@@ -645,6 +790,12 @@ def main():
     # Init
     p_init = subparsers.add_parser("init", help="Bootstrap standard skill directory structure in workspace")
 
+    # Optimize / Auto-Tune
+    p_opt = subparsers.add_parser("optimize", help="Auto-minimize active skills to essential Core + workspace stack")
+    p_opt.add_argument("--workspace", help="Path to workspace directory to inspect")
+    p_opt.add_argument("--protect", nargs="*", help="Additional skill names to protect from auto-archiving")
+    p_opt.add_argument("--dry-run", action="store_true", help="Preview optimization changes without moving files")
+
     # List / Overview
     p_list = subparsers.add_parser("list", help="Present active and archived skills")
     p_list.add_argument("-a", "--active", action="store_true", help="List only active skills (L1 Context)")
@@ -693,6 +844,8 @@ def main():
 
     if args.command == "init":
         mgr.init()
+    elif args.command == "optimize":
+        mgr.optimize(workspace_path=args.workspace, protected_skills=args.protect, dry_run=args.dry_run)
     elif args.command == "list":
         show_active = not args.archived or args.active
         show_archived = not args.active or args.archived

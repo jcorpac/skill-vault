@@ -6,13 +6,14 @@ Validates:
 1. Path resolution across environments
 2. Workspace bootstrapping (init)
 3. Presenting active and archived skills (list & status)
-4. Archiving with LLM categories & preservation of SKILL.md
-5. Restoring skills (single, pattern, category, overwrite)
-6. Recategorization in manifest & index
-7. Reindexing & relative link generation
-8. Search matching
-9. Bi-directional integrity audit & self-healing (--fix)
-10. CLI command execution
+4. Workspace detection & automated optimization (optimize)
+5. Archiving with LLM categories & preservation of SKILL.md
+6. Restoring skills (single, pattern, category, overwrite)
+7. Recategorization in manifest & index
+8. Reindexing & relative link generation
+9. Search matching
+10. Bi-directional integrity audit & self-healing (--fix)
+11. CLI command execution
 """
 
 import io
@@ -101,7 +102,6 @@ class TestSkillVault(unittest.TestCase):
         self._create_mock_skill(self.skills_dir, "archived-skill-1", "Archived skill description.")
         self.mgr.archive(name="archived-skill-1", category="Analytics")
 
-        # Capture output of list
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
         try:
@@ -115,7 +115,79 @@ class TestSkillVault(unittest.TestCase):
         finally:
             sys.stdout = old_stdout
 
-    # --- 3. Archive Tests ---
+    # --- 3. Workspace Detection & Auto-Optimization Tests ---
+
+    def test_detect_workspace_categories(self):
+        """Test scanning files to fingerprint workspace stack."""
+        ws = tempfile.TemporaryDirectory()
+        try:
+            ws_path = Path(ws.name)
+            (ws_path / "dbt_project.yml").write_text("name: my_dbt_project", encoding="utf-8")
+            (ws_path / "models").mkdir(parents=True, exist_ok=True)
+            (ws_path / "models" / "query.sql").write_text("SELECT 1;", encoding="utf-8")
+
+            detected = self.mgr.detect_workspace_categories(ws_path)
+            self.assertIn("BigQuery & Data Warehouse", detected)
+        finally:
+            ws.cleanup()
+
+    def test_optimize_minimization(self):
+        """Test auto-minimization keeping core + matched skills, archiving unrelated skills."""
+        # 1. Setup Active Skills
+        self._create_mock_skill(self.skills_dir, "skill-vault", "Vault Core.")
+        self._create_mock_skill(self.skills_dir, "accidental-data-loss-prevention", "Safety Core.")
+        self._create_mock_skill(self.skills_dir, "unrelated-bio-skill", "Bio skill in active memory.")
+        self._create_mock_skill(self.skills_dir, "bigquery-helper", "BigQuery tool in active memory.")
+
+        # 2. Setup Archive Vault
+        manifest = [
+            {
+                "name": "unrelated-bio-skill",
+                "category": "Science & Biomedicine",
+                "original_path": "skills/unrelated-bio-skill",
+                "archived_path": "skill_archive/skills/unrelated-bio-skill",
+            },
+            {
+                "name": "bigquery-helper",
+                "category": "BigQuery & Data Warehouse",
+                "original_path": "skills/bigquery-helper",
+                "archived_path": "skill_archive/skills/bigquery-helper",
+            },
+            {
+                "name": "vaulted-sql-tool",
+                "category": "BigQuery & Data Warehouse",
+                "original_path": "skills/vaulted-sql-tool",
+                "archived_path": "skill_archive/skills/vaulted-sql-tool",
+            },
+        ]
+        self.mgr.save_manifest(manifest)
+        # Create vaulted skill folder
+        self._create_mock_skill(self.archive_dir / "skills", "vaulted-sql-tool", "Vaulted SQL tool.")
+
+        # 3. Create a SQL workspace
+        ws = tempfile.TemporaryDirectory()
+        try:
+            ws_path = Path(ws.name)
+            (ws_path / "query.sql").write_text("SELECT * FROM table;", encoding="utf-8")
+
+            # Run optimize
+            self.mgr.optimize(workspace_path=ws_path)
+
+            # Core skills must remain active
+            self.assertTrue((self.skills_dir / "skill-vault").exists())
+            self.assertTrue((self.skills_dir / "accidental-data-loss-prevention").exists())
+
+            # Matched BigQuery skills must be active
+            self.assertTrue((self.skills_dir / "bigquery-helper").exists())
+            self.assertTrue((self.skills_dir / "vaulted-sql-tool").exists())
+
+            # Unrelated bio skill must be evicted to cold storage
+            self.assertFalse((self.skills_dir / "unrelated-bio-skill").exists())
+            self.assertTrue((self.archive_dir / "skills" / "unrelated-bio-skill").exists())
+        finally:
+            ws.cleanup()
+
+    # --- 4. Archive Tests ---
 
     def test_archive_single_skill_with_category(self):
         """Test archiving a single active skill with category."""
@@ -123,19 +195,15 @@ class TestSkillVault(unittest.TestCase):
         
         self.mgr.archive(name="cloud-sql-backup", category="Cloud Database")
 
-        # 1. Verify removed from active skills
         self.assertFalse((self.skills_dir / "cloud-sql-backup").exists())
 
-        # 2. Verify present in archive
         archived_skill = self.archive_dir / "skills" / "cloud-sql-backup"
         self.assertTrue((archived_skill / "SKILL.md").exists())
 
-        # 3. Verify SKILL.md was untouched and pure
         content = (archived_skill / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("name: cloud-sql-backup", content)
         self.assertNotIn("Cloud Database", content)
 
-        # 4. Verify manifest and INDEX.md
         manifest = self.mgr.load_manifest()
         self.assertEqual(len(manifest), 1)
         self.assertEqual(manifest[0]["name"], "cloud-sql-backup")
@@ -159,7 +227,7 @@ class TestSkillVault(unittest.TestCase):
         self.assertTrue((self.archive_dir / "skills" / "gcp-pubsub").exists())
         self.assertFalse((self.archive_dir / "skills" / "aws-s3").exists())
 
-    # --- 4. Recategorize Tests ---
+    # --- 5. Recategorize Tests ---
 
     def test_recategorize_skill(self):
         """Test updating a category without touching SKILL.md."""
@@ -175,7 +243,7 @@ class TestSkillVault(unittest.TestCase):
         self.assertIn("## Data Engineering (1 skills)", index_content)
         self.assertNotIn("Initial Category", index_content)
 
-    # --- 5. Restore Tests ---
+    # --- 6. Restore Tests ---
 
     def test_restore_single_and_category(self):
         """Test restoring archived skills back to active locations."""
@@ -186,16 +254,14 @@ class TestSkillVault(unittest.TestCase):
         self.assertFalse((self.skills_dir / "bigquery-optimizer").exists())
         self.assertFalse((self.skills_dir / "bigquery-partitioning").exists())
 
-        # 1. Restore single skill
         self.mgr.restore(name="bigquery-optimizer")
         self.assertTrue((self.skills_dir / "bigquery-optimizer" / "SKILL.md").exists())
         self.assertFalse((self.skills_dir / "bigquery-partitioning").exists())
 
-        # 2. Restore entire category
         self.mgr.restore(category="Data Warehouse")
         self.assertTrue((self.skills_dir / "bigquery-partitioning" / "SKILL.md").exists())
 
-    # --- 6. Search Tests ---
+    # --- 7. Search Tests ---
 
     def test_search_skills(self):
         """Test keyword searching in names, descriptions, and categories."""
@@ -212,7 +278,7 @@ class TestSkillVault(unittest.TestCase):
         finally:
             sys.stdout = old_stdout
 
-    # --- 7. Integrity Verification & Self-Healing Tests ---
+    # --- 8. Integrity Verification & Self-Healing Tests ---
 
     def test_integrity_audit_clean(self):
         """Test verify returns 0 when archive is in 100% sync."""
@@ -255,7 +321,7 @@ class TestSkillVault(unittest.TestCase):
         self.assertIn("unindexed-skill", names)
         self.assertIn("skill-valid", names)
 
-    # --- 8. End-to-End CLI Invocation Test ---
+    # --- 9. End-to-End CLI Invocation Test ---
 
     def test_cli_execution(self):
         """Test running skill_vault.py directly via subprocess CLI."""
@@ -272,14 +338,14 @@ class TestSkillVault(unittest.TestCase):
         self.assertEqual(res.returncode, 0)
         self.assertIn("[Archived]", res.stdout)
 
-        # List via CLI
-        res_list = subprocess.run(
-            [sys.executable, str(script_path), "--base-dir", str(self.base_dir), "list"],
+        # Optimize via CLI
+        res_opt = subprocess.run(
+            [sys.executable, str(script_path), "--base-dir", str(self.base_dir), "optimize", "--dry-run"],
             capture_output=True,
             text=True
         )
-        self.assertEqual(res_list.returncode, 0)
-        self.assertIn("cli-test-skill", res_list.stdout)
+        self.assertEqual(res_opt.returncode, 0)
+        self.assertIn("SKILL VAULT AUTO-OPTIMIZATION", res_opt.stdout)
 
         # Verify via CLI
         res_verify = subprocess.run(

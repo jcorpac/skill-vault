@@ -79,6 +79,8 @@ python scripts/skill_vault.py verify
 | Command | Description |
 | :--- | :--- |
 | `skill-vault init` | Bootstrap standard skill and archive folders in workspace. |
+| `skill-vault optimize` | Auto-minimize active skills to essential Core + workspace stack. |
+| `skill-vault optimize --dry-run` | Preview auto-minimization changes without moving files. |
 | `skill-vault list` | Present all active skills (L1) and archived skills (L2). |
 | `skill-vault status` | Fast summary of skill counts and category breakdown. |
 | `skill-vault list --active` | List only active skills currently loaded in context memory. |

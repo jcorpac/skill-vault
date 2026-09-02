@@ -116,6 +116,19 @@ python scripts/skill_vault.py verify
 python scripts/skill_vault.py verify --fix
 ```
 
+### H. Automated Context Optimization (Zero-Effort Pruning & Mounting)
+To automatically keep only the minimum necessary skills active in context memory (L1) based on workspace fingerprints, while parking unneeded skills in cold storage (L2):
+```bash
+# Automatically optimize active skills for the current workspace
+python scripts/skill_vault.py optimize
+
+# Preview what would be archived and mounted without moving files
+python scripts/skill_vault.py optimize --dry-run
+
+# Optimize for a specific workspace folder and protect custom skills
+python scripts/skill_vault.py optimize --workspace "C:\Projects\my-repo" --protect my-custom-skill
+```
+
 ---
 
 ## 3. Environment & OS Compatibility Guidelines
