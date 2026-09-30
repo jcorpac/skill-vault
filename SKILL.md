@@ -1,6 +1,17 @@
 ---
 name: skill-vault
-description: Universal agent-agnostic and OS-agnostic skill router, tiered storage manager, and lifecycle auditor. Solves context bloat and skill bleed by managing active skills vs archived cold storage across environments (Google Antigravity, Claude Code, Cursor, CI/CD).
+description: >-
+  Universal agent-agnostic skill router and tiered storage manager for 210+ specialized domain skills in cold storage.
+  ALWAYS use this skill whenever the task involves domains or tools not in active memory, including:
+  (1) AlloyDB (Omni, replication, vector, tuning),
+  (2) Cloud SQL (Postgres, MySQL, backup/DR, performance),
+  (3) BigQuery & Data Warehouse (dbt, Dataform, optimization),
+  (4) GCP & Data Engineering (Airflow/Composer, Spanner, Dataproc, GCS),
+  (5) Gemini API & AI Agents (ADK, Live API, Omni Flash, evals),
+  (6) Science & Biomedicine (AlphaFold, AlphaGenome, Foldseek, ChEMBL, PDB, PyMOL, PubMed, variant analysis),
+  (7) Android Development, or
+  (8) General Utilities.
+  Search or restore skills on demand via 'python scripts/skill_vault.py search "<keyword>"', view 'skill_archive/INDEX.md', or run 'restore <name>'.
 ---
 
 # Skill Vault: Universal Agent Skill Lifecycle & Storage Manager
