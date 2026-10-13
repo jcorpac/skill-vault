@@ -140,6 +140,16 @@ python scripts/skill_vault.py optimize --dry-run
 python scripts/skill_vault.py optimize --workspace "C:\Projects\my-repo" --protect my-custom-skill
 ```
 
+### I. Recency & Version Prioritization Protocol
+Skill Vault automatically protects newer skills and prevents regressions when archiving, restoring, or optimizing:
+1. **Semantic Version Check**: Compares `version:` headers in `SKILL.md` frontmatter (e.g., `v2` > `v1`, `1.2.0` > `1.1.0`).
+2. **Timestamp Recency Fallback**: If versions match or are unversioned, compares the newest file modification timestamp (`mtime`).
+3. **Tier Behavior**:
+   - **`archive`**: When L1 is newer or equal to L2, updates L2 with the active version. If L2 is strictly newer, preserves L2 to avoid overwriting with stale files.
+   - **`restore`**: When L2 is strictly newer than L1, upgrades active L1 with the newer vault copy. If L1 is newer or equal, preserves L1.
+   - **`optimize`**: Automatically detects and upgrades active L1 skills if newer versions exist in the vault, while archiving unneeded skills safely.
+   - **`--force`**: Bypasses recency checks on `archive`, `restore`, or `optimize` when an intentional overwrite is required.
+
 ---
 
 ## 3. Environment & OS Compatibility Guidelines

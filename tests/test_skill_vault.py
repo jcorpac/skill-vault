@@ -29,7 +29,7 @@ import unittest
 # Import SkillVault from the parent scripts directory
 SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
-from skill_vault import SkillVault, resolve_base_dir
+from skill_vault import SkillVault, resolve_base_dir, parse_version_tuple, compare_skill_recency
 
 
 class TestSkillVault(unittest.TestCase):
@@ -51,12 +51,13 @@ class TestSkillVault(unittest.TestCase):
         """Clean up the sandbox."""
         self.test_dir.cleanup()
 
-    def _create_mock_skill(self, base_path, name, description="A test skill description.", extra_files=None):
+    def _create_mock_skill(self, base_path, name, description="A test skill description.", version=None, extra_files=None):
         """Helper to create a valid mock skill folder."""
         skill_dir = base_path / name
         skill_dir.mkdir(parents=True, exist_ok=True)
         skill_md = skill_dir / "SKILL.md"
-        content = f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n\nInstructions."
+        ver_header = f"version: {version}\n" if version else ""
+        content = f"---\nname: {name}\n{ver_header}description: {description}\n---\n\n# {name}\n\nInstructions."
         skill_md.write_text(content, encoding="utf-8")
 
         if extra_files:
@@ -355,6 +356,92 @@ class TestSkillVault(unittest.TestCase):
         )
         self.assertEqual(res_verify.returncode, 0)
         self.assertIn("[OK] 100% Integrity Verified!", res_verify.stdout)
+
+    # --- 10. Recency & Version Prioritization Tests ---
+
+    def test_parse_version_tuple(self):
+        """Test parsing diverse version formats into comparable tuples."""
+        self.assertEqual(parse_version_tuple("v1"), (1,))
+        self.assertEqual(parse_version_tuple("v20"), (20,))
+        self.assertEqual(parse_version_tuple("1.2.3"), (1, 2, 3))
+        self.assertEqual(parse_version_tuple("v0.9.1"), (0, 9, 1))
+        self.assertIsNone(parse_version_tuple(""))
+        self.assertIsNone(parse_version_tuple(None))
+        self.assertIsNone(parse_version_tuple("unversioned"))
+
+    def test_compare_skill_recency_version_and_mtime(self):
+        """Test compare_skill_recency with semantic version and mtime fallback."""
+        skill_a = self._create_mock_skill(self.skills_dir, "skill-a", version="v2")
+        skill_b = self._create_mock_skill(self.archive_dir / "skills", "skill-b", version="v1")
+        self.assertEqual(compare_skill_recency(skill_a, skill_b), 1)
+        self.assertEqual(compare_skill_recency(skill_b, skill_a), -1)
+
+        # Equal versions compare identical
+        skill_c = self._create_mock_skill(self.skills_dir, "skill-c", version="v1")
+        self.assertEqual(compare_skill_recency(skill_b, skill_c), 0)
+
+    def test_archive_prioritizes_newer_version(self):
+        """Test archiving overwrites older archive if active is newer, but preserves newer archive if active is older."""
+        # 1. Active is newer (v2) than Archive (v1) -> Archive must be upgraded to v2
+        self._create_mock_skill(self.skills_dir, "evolving-skill", version="v2")
+        self._create_mock_skill(self.archive_dir / "skills", "evolving-skill", version="v1")
+        manifest = [{
+            "name": "evolving-skill",
+            "category": "Testing",
+            "original_path": "skills/evolving-skill",
+            "archived_path": "skill_archive/skills/evolving-skill",
+        }]
+        self.mgr.save_manifest(manifest)
+
+        self.mgr.archive(name="evolving-skill")
+        archived_md = (self.archive_dir / "skills" / "evolving-skill" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("version: v2", archived_md)
+
+        # 2. Active is older (v1) than Archive (v2) -> Archive must be preserved at v2, not overwritten
+        self._create_mock_skill(self.skills_dir, "evolving-skill", version="v1")
+        self.mgr.archive(name="evolving-skill")
+        archived_md_after = (self.archive_dir / "skills" / "evolving-skill" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("version: v2", archived_md_after)
+
+    def test_restore_prioritizes_newer_version(self):
+        """Test restore updates active skill if archive is newer, but skips if active is already newer."""
+        # 1. Archive is newer (v2) than Active (v1) -> Active must be updated to v2
+        self._create_mock_skill(self.skills_dir, "restorable-skill", version="v1")
+        self._create_mock_skill(self.archive_dir / "skills", "restorable-skill", version="v2")
+        manifest = [{
+            "name": "restorable-skill",
+            "category": "Testing",
+            "original_path": "skills/restorable-skill",
+            "archived_path": "skill_archive/skills/restorable-skill",
+        }]
+        self.mgr.save_manifest(manifest)
+
+        self.mgr.restore(name="restorable-skill")
+        active_md = (self.skills_dir / "restorable-skill" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("version: v2", active_md)
+
+        # 2. Active is newer (v3) than Archive (v2) -> Active must remain at v3
+        (self.skills_dir / "restorable-skill" / "SKILL.md").write_text("---\nname: restorable-skill\nversion: v3\ndescription: Test.\n---\n", encoding="utf-8")
+        self.mgr.restore(name="restorable-skill")
+        active_md_preserved = (self.skills_dir / "restorable-skill" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("version: v3", active_md_preserved)
+
+    def test_force_overwrites_regardless_of_recency(self):
+        """Test --force flag forces overwrite even when target is newer."""
+        self._create_mock_skill(self.skills_dir, "forced-skill", version="v1")
+        self._create_mock_skill(self.archive_dir / "skills", "forced-skill", version="v2")
+        manifest = [{
+            "name": "forced-skill",
+            "category": "Testing",
+            "original_path": "skills/forced-skill",
+            "archived_path": "skill_archive/skills/forced-skill",
+        }]
+        self.mgr.save_manifest(manifest)
+
+        # Forcing archive of older v1 over newer v2
+        self.mgr.archive(name="forced-skill", force=True)
+        archived_md = (self.archive_dir / "skills" / "forced-skill" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("version: v1", archived_md)
 
 
 if __name__ == "__main__":

@@ -85,10 +85,12 @@ python scripts/skill_vault.py verify
 | `skill-vault status` | Fast summary of skill counts and category breakdown. |
 | `skill-vault list --active` | List only active skills currently loaded in context memory. |
 | `skill-vault list --archived` | List only cold-storage skills grouped by category. |
-| `skill-vault archive <name> --category "<Cat>"` | Move active skill to archive with category metadata. |
+| `skill-vault archive <name> --category "<Cat>"` | Move active skill to archive with category metadata (preserves newer L2 copies). |
+| `skill-vault archive <name> --force` | Force archive overwrite regardless of archive recency. |
 | `skill-vault archive --pattern "gcp-*"` | Archive multiple matching skills via glob pattern. |
 | `skill-vault recategorize <name> "<New Cat>"` | Reorganize skill category without modifying `SKILL.md`. |
-| `skill-vault restore <name>` | Restore an archived skill back to active availability. |
+| `skill-vault restore <name>` | Restore an archived skill back to active availability (auto-upgrades if L2 is newer). |
+| `skill-vault restore <name> --force` | Force restore overwrite regardless of active recency. |
 | `skill-vault restore --category "<Cat>"` | Restore all skills in a specific category. |
 | `skill-vault search "<query>"` | Search skills across names, descriptions, and categories. |
 | `skill-vault reindex` | Regenerate `INDEX.md` and sync `backup_manifest.json`. |
@@ -103,6 +105,7 @@ python scripts/skill_vault.py verify
 2. **Environment Agnostic**: Dynamically resolves workspace roots via CLI flags (`--base-dir`), environment variables (`$SKILL_VAULT_BASE`), script parents, or working directories.
 3. **Zero Runtime Dependencies**: The core engine requires only Python 3 standard library (`os`, `sys`, `json`, `re`, `shutil`, `hashlib`, `argparse`, `pathlib`).
 4. **Self-Healing Integrity**: Detects orphaned folders, phantom manifest entries, broken markdown links, and duplicate aliases.
+5. **Recency & Version Prioritization**: Automatically protects newer versions when archiving, restoring, or optimizing by evaluating semantic version tags (`version:`) with filesystem timestamp (`mtime`) fallbacks. Use `--force` to override.
 
 ---
 

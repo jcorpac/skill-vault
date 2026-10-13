@@ -68,6 +68,69 @@ WORKSPACE_FINGERPRINTS = {
 }
 
 
+def parse_version_tuple(ver_str):
+    """Parse version string into a comparable numeric tuple, e.g. 'v20' -> (20,), '1.1.5' -> (1, 1, 5)."""
+    if not ver_str:
+        return None
+    cleaned = str(ver_str).strip().strip("'\"").lstrip("vV")
+    nums = re.findall(r"\d+", cleaned)
+    if nums:
+        return tuple(int(n) for n in nums)
+    return None
+
+
+def get_skill_metadata(skill_dir):
+    """Extract parsed version and latest modification timestamp for a skill directory."""
+    skill_dir = Path(skill_dir)
+    skill_md = skill_dir / "SKILL.md"
+
+    ver_tuple = None
+    if skill_md.exists():
+        try:
+            content = skill_md.read_text(encoding="utf-8", errors="ignore")
+            fm_match = re.search(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+            if fm_match:
+                v_match = re.search(r"version:\s*([^\n]+)", fm_match.group(1), re.IGNORECASE)
+                if v_match:
+                    ver_tuple = parse_version_tuple(v_match.group(1))
+        except Exception:
+            pass
+
+    latest_mtime = 0.0
+    try:
+        files = [f for f in skill_dir.rglob("*") if f.is_file()]
+        if files:
+            latest_mtime = max(f.stat().st_mtime for f in files)
+        elif skill_dir.exists():
+            latest_mtime = skill_dir.stat().st_mtime
+    except Exception:
+        pass
+
+    return ver_tuple, latest_mtime
+
+
+def compare_skill_recency(dir_a, dir_b):
+    """Compare two skill directories to determine which is newer.
+
+    Returns:
+       1 if dir_a is newer than dir_b
+      -1 if dir_b is newer than dir_a
+       0 if they are equivalent in version and recency
+    """
+    ver_a, mtime_a = get_skill_metadata(dir_a)
+    ver_b, mtime_b = get_skill_metadata(dir_b)
+
+    # 1. Compare semantic/numeric versions if both exist and differ
+    if ver_a is not None and ver_b is not None and ver_a != ver_b:
+        return 1 if ver_a > ver_b else -1
+
+    # 2. Compare file modification timestamps (allowing a 1-second margin for filesystem granularity)
+    if abs(mtime_a - mtime_b) > 1.0:
+        return 1 if mtime_a > mtime_b else -1
+
+    return 0
+
+
 def resolve_base_dir(cli_base=None):
     """Dynamically resolve the base directory for skills and archives."""
     if cli_base:
@@ -134,8 +197,16 @@ class SkillVault:
 
         for sub in [".agents/skills", ".claude/skills"]:
             p = self.base_dir / sub
-            if p.exists():
+            if p.exists() and p not in dirs:
                 dirs.append(p)
+
+        # Also search active working directory and its skill locations if distinct from base_dir
+        cwd = Path.cwd().resolve()
+        if cwd != self.base_dir:
+            for sub in ["skills", ".agents/skills", ".claude/skills"]:
+                p = cwd / sub
+                if p.exists() and p not in dirs:
+                    dirs.append(p)
 
         plugins_dir = self.base_dir / "plugins"
         if plugins_dir.exists():
@@ -303,10 +374,11 @@ class SkillVault:
 
         return matched
 
-    def optimize(self, workspace_path=None, protected_skills=None, dry_run=False):
+    def optimize(self, workspace_path=None, protected_skills=None, dry_run=False, force=False):
         """Automatically minimize active skills to essential Core + workspace-relevant skills.
         
-        Archives unneeded active skills into cold storage and mounts matching domain skills.
+        Archives unneeded active skills into cold storage and mounts matching domain skills,
+        prioritizing newer versions when versions overlap.
         """
         target_ws = Path(workspace_path).resolve() if workspace_path else Path.cwd().resolve()
         core_set = set(DEFAULT_CORE_SKILLS)
@@ -346,6 +418,17 @@ class SkillVault:
                 else:
                     to_archive.append((name, skill_cat))
 
+        # Check if any kept active skill has a newer version in the archive
+        to_upgrade = []
+        for name, reason in to_keep:
+            if name in manifest_by_name:
+                item = manifest_by_name[name]
+                archived_path = self.resolve_portable_path(item.get("archived_path", ""))
+                active_path = self.find_active_skill(name)
+                if archived_path.exists() and active_path and active_path.exists():
+                    if compare_skill_recency(archived_path, active_path) > 0:
+                        to_upgrade.append((name, reason))
+
         # 3. Determine skills in vault that should be mounted
         to_mount = []
         for cat in detected_categories.keys():
@@ -358,6 +441,11 @@ class SkillVault:
         print(f"  * Retained in Context ({len(to_keep)} skills):")
         for name, reason in to_keep:
             print(f"    [KEEP] {name} - {reason}")
+
+        if to_upgrade:
+            print(f"\n  * Upgrading Active Skills with Newer Vault Versions ({len(to_upgrade)} skills):")
+            for name, reason in to_upgrade:
+                print(f"    [UPGRADE] {name} (Newer version found in Vault)")
 
         if to_archive:
             print(f"\n  * Evicting to Cold Storage Archive ({len(to_archive)} skills):")
@@ -375,17 +463,23 @@ class SkillVault:
             print("\n[Dry Run] Optimization preview complete. No files were moved.")
             return
 
+        # Execute Upgrades
+        if to_upgrade:
+            print("\nExecuting Auto-Upgrades from Newer Vault Copies...")
+            for name, _ in to_upgrade:
+                self.restore(name=name, force=True)
+
         # Execute Evictions (Archive)
         if to_archive:
             print("\nExecuting Auto-Archival...")
             for name, cat in to_archive:
-                self.archive(name=name, category=cat, keep_active=False)
+                self.archive(name=name, category=cat, keep_active=False, force=force)
 
         # Execute Mounts (Restore)
         if to_mount:
             print("\nExecuting Auto-Mounts...")
             for name, cat in to_mount:
-                self.restore(name=name)
+                self.restore(name=name, force=force)
 
         print("\n[OK] Optimization complete! Active context surface is at absolute minimum.")
 
@@ -476,8 +570,8 @@ class SkillVault:
                         print(f"    * {s['name']}: {desc_snippet}")
                 print("")
 
-    def archive(self, name=None, pattern=None, category=None, keep_active=False):
-        """Archive active skills with an assigned category."""
+    def archive(self, name=None, pattern=None, category=None, keep_active=False, force=False):
+        """Archive active skills with an assigned category, prioritizing newer versions."""
         manifest = self.load_manifest()
         manifest_map = {item["name"]: item for item in manifest}
 
@@ -507,9 +601,23 @@ class SkillVault:
             dest_dir.parent.mkdir(parents=True, exist_ok=True)
 
             if dest_dir.exists():
-                shutil.rmtree(dest_dir)
+                recency = compare_skill_recency(active_path, dest_dir)
+                if recency < 0 and not force:
+                    print(f"[Skip] L2 archive '{skill_name}' is newer than active L1 version. Preserving newer archive (use --force to overwrite).")
+                    if not keep_active:
+                        shutil.rmtree(active_path)
+                        print(f"[Cleaned] Removed older active directory: {active_path}")
+                    continue
+                elif recency > 0:
+                    print(f"[Archived] Overwriting older L2 archive with newer active L1 version: {active_path} -> {dest_dir}")
+                    shutil.rmtree(dest_dir)
+                else:
+                    shutil.rmtree(dest_dir)
+                    print(f"[Archived] {active_path} -> {dest_dir}")
+            else:
+                print(f"[Archived] {active_path} -> {dest_dir}")
+
             shutil.copytree(active_path, dest_dir)
-            print(f"[Archived] {active_path} -> {dest_dir}")
 
             existing_cat = manifest_map.get(skill_name, {}).get("category")
             assigned_cat = category_name or existing_cat or "General & Utility Skills"
@@ -576,10 +684,14 @@ class SkillVault:
 
             original_path.parent.mkdir(parents=True, exist_ok=True)
             if original_path.exists():
-                if force:
+                recency = compare_skill_recency(archived_path, original_path)
+                if recency > 0 or force:
                     shutil.rmtree(original_path)
+                    shutil.copytree(archived_path, original_path)
+                    print(f"[Restored] Updated L1 with newer L2 version: {item['name']} -> {original_path}")
+                    continue
                 else:
-                    print(f"[Skip] Target exists: {original_path} (use --force to overwrite)")
+                    print(f"[Skip] Target L1 skill '{item['name']}' is already newer than or equal to L2 archive (use --force to overwrite)")
                     continue
 
             shutil.copytree(archived_path, original_path)
@@ -795,6 +907,7 @@ def main():
     p_opt.add_argument("--workspace", help="Path to workspace directory to inspect")
     p_opt.add_argument("--protect", nargs="*", help="Additional skill names to protect from auto-archiving")
     p_opt.add_argument("--dry-run", action="store_true", help="Preview optimization changes without moving files")
+    p_opt.add_argument("--force", action="store_true", help="Force overwrite during optimization regardless of recency")
 
     # List / Overview
     p_list = subparsers.add_parser("list", help="Present active and archived skills")
@@ -814,6 +927,7 @@ def main():
     p_arch.add_argument("--pattern", help="Glob pattern (e.g. 'gcp-*')")
     p_arch.add_argument("--category", help="Category name (e.g. 'Cloud Architecture')")
     p_arch.add_argument("--keep-active", action="store_true", help="Do not delete source folder")
+    p_arch.add_argument("--force", action="store_true", help="Force overwrite in archive regardless of recency")
 
     # Recategorize
     p_rec = subparsers.add_parser("recategorize", help="Recategorize an archived skill in metadata")
@@ -845,7 +959,7 @@ def main():
     if args.command == "init":
         mgr.init()
     elif args.command == "optimize":
-        mgr.optimize(workspace_path=args.workspace, protected_skills=args.protect, dry_run=args.dry_run)
+        mgr.optimize(workspace_path=args.workspace, protected_skills=args.protect, dry_run=args.dry_run, force=args.force)
     elif args.command == "list":
         show_active = not args.archived or args.active
         show_archived = not args.active or args.archived
@@ -864,7 +978,7 @@ def main():
             summary_only=True,
         )
     elif args.command == "archive":
-        mgr.archive(name=args.name, pattern=args.pattern, category=args.category, keep_active=args.keep_active)
+        mgr.archive(name=args.name, pattern=args.pattern, category=args.category, keep_active=args.keep_active, force=args.force)
     elif args.command == "recategorize":
         mgr.recategorize(name=args.name, new_category=args.category)
     elif args.command == "restore":
