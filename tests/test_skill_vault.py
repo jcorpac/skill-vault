@@ -541,6 +541,75 @@ class TestSkillVault(unittest.TestCase):
         self.assertIn("[Imported] cli-import-skill", res.stdout)
         self.assertTrue((dest_dir / "cli-import-skill" / "SKILL.md").exists())
 
+    # --- 9. Auto-Sync & Ingestion Engine Tests ---
+
+    def test_sync_ingests_and_prunes_plugins(self):
+        """Test sync ingests new plugin skills into vault and prunes active non-core copies."""
+        plugins_dir = self.base_dir / "plugins"
+        # 1. Standard plugin with nested skill
+        mock_tool_dir = plugins_dir / "my-tool-plugin" / "skills" / "my-tool"
+        self._create_mock_skill(mock_tool_dir.parent, "my-tool", description="A special tool.")
+
+        # 2. Single-skill plugin layout
+        single_plugin_dir = plugins_dir / "single-plugin" / "skills"
+        single_plugin_dir.mkdir(parents=True, exist_ok=True)
+        (single_plugin_dir / "SKILL.md").write_text("---\nname: single-skill\ndescription: Single plugin.\n---\n# single\n", encoding="utf-8")
+
+        # 3. Core foundation skill in active skills
+        core_dir = self.base_dir / "skills"
+        self._create_mock_skill(core_dir, "skill-vault", description="Core skill.")
+
+        exit_code = self.mgr.sync()
+        self.assertEqual(exit_code, 0)
+
+        # Verify vault contains ingested skills
+        manifest = self.mgr.load_manifest()
+        manifest_names = {m["name"] for m in manifest}
+        self.assertIn("my-tool", manifest_names)
+        self.assertIn("single-skill", manifest_names)
+
+        # Verify core skill was kept active
+        self.assertTrue((core_dir / "skill-vault" / "SKILL.md").exists())
+
+        # Verify non-core plugin skills were pruned
+        self.assertFalse(mock_tool_dir.exists())
+        self.assertFalse((single_plugin_dir / "SKILL.md").exists())
+        self.assertTrue(single_plugin_dir.exists())  # Directory preserved, contents emptied
+
+    def test_sync_dry_run(self):
+        """Test sync with --dry-run does not modify active files or vault."""
+        plugins_dir = self.base_dir / "plugins"
+        p_dir = plugins_dir / "dry-plugin" / "skills" / "dry-skill"
+        self._create_mock_skill(p_dir.parent, "dry-skill", description="Dry run test.")
+
+        exit_code = self.mgr.sync(dry_run=True)
+        self.assertEqual(exit_code, 0)
+
+        # File should still exist
+        self.assertTrue((p_dir / "SKILL.md").exists())
+        # Vault should not contain it
+        manifest = self.mgr.load_manifest()
+        manifest_names = {m["name"] for m in manifest}
+        self.assertNotIn("dry-skill", manifest_names)
+
+    def test_sync_cli(self):
+        """Test sync command execution via subprocess CLI."""
+        script_path = SCRIPT_DIR / "skill_vault.py"
+        res = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "--base-dir",
+                str(self.base_dir),
+                "sync",
+                "--dry-run",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res.returncode, 0, f"CLI stderr: {res.stderr}")
+        self.assertIn("SKILL VAULT AUTO-SYNC & INGEST", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -172,6 +172,19 @@ python scripts/skill_vault.py import <skill_name> --dry-run
 python scripts/skill_vault.py import <skill_name> --force
 ```
 
+### K. Automated Plugin Ingestion & Syncing (`sync`)
+Whenever plugins are installed or updated, use `sync` to scan all active locations and plugins, ingest new/updated skills into the vault, protect the Core Foundation Skills, and prune non-core skills:
+```bash
+# Scan plugins and active skills, ingest new/updated skills, and prune non-core active skills
+python scripts/skill_vault.py sync
+
+# Preview what would be ingested and pruned without moving or deleting files
+python scripts/skill_vault.py sync --dry-run
+
+# Ingest new/updated skills into the vault while keeping all active
+python scripts/skill_vault.py sync --keep-active
+```
+
 ---
 
 ## 3. Environment & OS Compatibility Guidelines

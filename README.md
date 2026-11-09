@@ -94,6 +94,9 @@ python scripts/skill_vault.py verify
 | `skill-vault restore --category "<Cat>"` | Restore all skills in a specific category. |
 | `skill-vault search "<query>"` | Search skills across names, descriptions, and categories. |
 | `skill-vault reindex` | Regenerate `INDEX.md` and sync `backup_manifest.json`. |
+| `skill-vault sync` | Auto-scan plugins & active dirs, ingest new/updated skills, and prune non-core skills. |
+| `skill-vault sync --dry-run` | Preview new/updated skills to ingest without moving or deleting files. |
+| `skill-vault sync --keep-active` | Ingest new/updated skills into the vault while keeping all active. |
 | `skill-vault import <name>` | Import a skill from vault into project directory (e.g. `./skills` or `./.agents/skills`). |
 | `skill-vault import --category "<Cat>"` | Import all skills in a category into the current project. |
 | `skill-vault import --pattern "gcp-*"` | Import matching skills via glob pattern into the project. |

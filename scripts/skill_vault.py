@@ -225,20 +225,53 @@ class SkillVault:
                     dirs.append(p / "skills")
         return dirs
 
+    def parse_skill_name(self, skill_md_path):
+        """Extract name from SKILL.md frontmatter."""
+        skill_md_path = Path(skill_md_path)
+        if not skill_md_path.exists():
+            return None
+        try:
+            content = skill_md_path.read_text(encoding="utf-8", errors="ignore")
+            fm_match = re.search(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+            if fm_match:
+                n_match = re.search(r"^name:\s*([^\n]+)", fm_match.group(1), re.MULTILINE)
+                if n_match:
+                    return n_match.group(1).strip().strip("'\"")
+        except Exception:
+            pass
+        return None
+
     def get_active_skills(self):
-        """Discover all currently active skills on disk."""
+        """Discover all currently active skills on disk across standard and plugin layouts."""
         active = {}
         for search_dir in self.get_active_skill_dirs():
-            if search_dir.exists():
-                for folder in search_dir.iterdir():
-                    if folder.is_dir() and (folder / "SKILL.md").exists():
-                        desc = self.parse_skill_description(folder / "SKILL.md")
-                        active[folder.name] = {
-                            "name": folder.name,
-                            "path": str(folder),
-                            "relative_path": self.make_portable_path(folder),
-                            "description": desc,
-                        }
+            if not search_dir.exists():
+                continue
+
+            # Case 1: search_dir contains subdirectories with SKILL.md (e.g. skills/<name>/SKILL.md)
+            for folder in search_dir.iterdir():
+                if folder.is_dir() and (folder / "SKILL.md").exists():
+                    skill_name = self.parse_skill_name(folder / "SKILL.md") or folder.name
+                    desc = self.parse_skill_description(folder / "SKILL.md")
+                    active[skill_name] = {
+                        "name": skill_name,
+                        "path": str(folder),
+                        "relative_path": self.make_portable_path(folder),
+                        "description": desc,
+                        "single_skill_dir": False,
+                    }
+
+            # Case 2: search_dir itself has SKILL.md directly (e.g. plugins/<plugin>/skills/SKILL.md)
+            if (search_dir / "SKILL.md").exists():
+                skill_name = self.parse_skill_name(search_dir / "SKILL.md") or search_dir.parent.name
+                desc = self.parse_skill_description(search_dir / "SKILL.md")
+                active[skill_name] = {
+                    "name": skill_name,
+                    "path": str(search_dir),
+                    "relative_path": self.make_portable_path(search_dir),
+                    "description": desc,
+                    "single_skill_dir": True,
+                }
         return active
 
     def get_archived_skill_folders(self):
@@ -492,6 +525,141 @@ class SkillVault:
                 self.restore(name=name, force=force)
 
         print("\n[OK] Optimization complete! Active context surface is at absolute minimum.")
+
+    # --- Sync & Ingestion Engine ---
+
+    def infer_category(self, skill_name, skill_desc=""):
+        """Infer an appropriate category for a new skill based on name and description keywords."""
+        text = f"{skill_name} {skill_desc}".lower()
+        if any(k in text for k in ["gemini", "adk", "live api", "llm agent", "vertex ai"]):
+            return "Gemini API & AI Agents"
+        if any(k in text for k in ["android", "gradle", "apk", "adb"]):
+            return "Android Development"
+        if any(k in text for k in ["bigquery", "dbt", "dataform", "data warehouse", "lakehouse"]):
+            return "BigQuery & Data Warehouse"
+        if any(k in text for k in ["alloydb", "omni"]):
+            return "AlloyDB"
+        if any(k in text for k in ["cloud sql", "postgres", "mysql"]):
+            return "Cloud SQL"
+        if any(k in text for k in ["protein", "alphafold", "pdb", "dna", "rna", "chembl", "bioinformatics", "variant", "genome", "pymol"]):
+            return "Science & Biomedicine"
+        if any(k in text for k in ["gcp", "airflow", "composer", "spanner", "dataflow", "dataproc", "pubsub", "cloud storage"]):
+            return "GCP & Data Engineering"
+        return "General & Utility Skills"
+
+    def sync(self, dry_run=False, keep_active=False, force=False, protect_skills=None):
+        """Automatically scan plugins and active directories for new or updated skills,
+        ingest them into the vault, preserve Core Foundation Skills, and prune non-core active skills."""
+        print("==================================================")
+        print("           SKILL VAULT AUTO-SYNC & INGEST")
+        print(f"  Base Directory: {self.base_dir}")
+        print(f"  Vault Store:    {self.archive_dir}")
+        print("==================================================\n")
+
+        core_set = set(DEFAULT_CORE_SKILLS)
+        if protect_skills:
+            core_set.update(protect_skills)
+
+        active_skills = self.get_active_skills()
+        manifest = self.load_manifest()
+        manifest_map = {m["name"]: m for m in manifest}
+
+        to_ingest_new = []
+        to_ingest_update = []
+        to_prune = []
+        in_sync = []
+        retained_core = []
+
+        for name, data in sorted(active_skills.items()):
+            active_path = Path(data["path"])
+            is_core = name in core_set
+
+            if name in manifest_map:
+                item = manifest_map[name]
+                archived_path = self.resolve_portable_path(item.get("archived_path", ""))
+                if not archived_path.exists():
+                    archived_path = self.archive_dir / "skills" / name
+
+                recency = compare_skill_recency(active_path, archived_path)
+                if recency > 0 or force:
+                    to_ingest_update.append((name, data, item.get("category") or self.infer_category(name, data["description"])))
+                else:
+                    in_sync.append(name)
+            else:
+                assigned_cat = self.infer_category(name, data["description"])
+                to_ingest_new.append((name, data, assigned_cat))
+
+            if is_core:
+                retained_core.append(name)
+            elif not keep_active:
+                to_prune.append((name, data))
+
+        print("Scan Results:")
+        print(f"  * New skills to ingest into vault:     {len(to_ingest_new)}")
+        for name, _, cat in to_ingest_new:
+            print(f"    [NEW] {name} -> Category: {cat}")
+
+        print(f"  * Updated skills to refresh in vault:  {len(to_ingest_update)}")
+        for name, _, cat in to_ingest_update:
+            print(f"    [UPDATE] {name} (Newer active version detected)")
+
+        print(f"  * In-sync skills in vault:             {len(in_sync)}")
+        print(f"  * Retained Core Foundation Skills:     {len(retained_core)} ({', '.join(sorted(retained_core))})")
+        print(f"  * Non-core active skills to prune:     {len(to_prune)}")
+        for name, _ in to_prune:
+            print(f"    [PRUNE] {name} (Will be removed from active context to prevent context bloat)")
+        print("")
+
+        if dry_run:
+            print("[Dry Run] Preview complete. No files were modified.")
+            return 0
+
+        total_ingested = 0
+        items_to_write = to_ingest_new + to_ingest_update
+        for name, data, cat in items_to_write:
+            active_path = Path(data["path"])
+            if name in manifest_map and manifest_map[name].get("archived_path"):
+                dest = self.resolve_portable_path(manifest_map[name]["archived_path"])
+            else:
+                dest = self.archive_dir / "skills" / name
+
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                shutil.rmtree(dest)
+
+            shutil.copytree(active_path, dest)
+            print(f"[Vaulted] {name} -> {dest}")
+
+            manifest_map[name] = {
+                "name": name,
+                "category": cat,
+                "original_path": data["relative_path"],
+                "archived_path": self.make_portable_path(dest),
+            }
+            total_ingested += 1
+
+        for name, data in to_prune:
+            active_path = Path(data["path"])
+            if data.get("single_skill_dir"):
+                for sub in active_path.iterdir():
+                    if sub.is_dir():
+                        shutil.rmtree(sub)
+                    else:
+                        sub.unlink()
+                print(f"[Pruned] Emptied single-skill directory: {active_path}")
+            else:
+                if active_path.exists():
+                    shutil.rmtree(active_path)
+                    print(f"[Pruned] Removed active folder: {active_path}")
+
+        if total_ingested > 0 or to_prune:
+            self.save_manifest(list(manifest_map.values()))
+            self.reindex()
+            self.verify()
+
+        print(f"\n[OK] Sync complete: {total_ingested} skill(s) vaulted/refreshed, {len(to_prune)} active skill(s) pruned.")
+        print(f"Active context memory is clean with {len(retained_core)} Core Foundation Skill(s).\n")
+        return 0
 
     # --- Actions ---
 
@@ -1183,6 +1351,13 @@ def main():
     p_srch = subparsers.add_parser("search", help="Search archived skills by keyword, intent, or domain")
     p_srch.add_argument("query", help="Keyword to search for")
 
+    # Sync
+    p_sync = subparsers.add_parser("sync", help="Scan plugins and active skills, ingest new/updated skills, and prune non-core skills")
+    p_sync.add_argument("--dry-run", action="store_true", help="Preview sync operations without moving or deleting files")
+    p_sync.add_argument("--keep-active", action="store_true", help="Keep all scanned skills active in context instead of pruning")
+    p_sync.add_argument("--force", action="store_true", help="Force overwrite in vault even if vault copy is newer")
+    p_sync.add_argument("--protect", nargs="*", help="Additional skill names to protect from pruning")
+
     # Import
     p_imp = subparsers.add_parser("import", help="Import skills from vault into project or target directory")
     p_imp.add_argument("name", nargs="?", help="Specific skill name to import")
@@ -1201,6 +1376,15 @@ def main():
         mgr.init()
     elif args.command == "optimize":
         mgr.optimize(workspace_path=args.workspace, protected_skills=args.protect, dry_run=args.dry_run, force=args.force)
+    elif args.command == "sync":
+        sys.exit(
+            mgr.sync(
+                dry_run=args.dry_run,
+                keep_active=args.keep_active,
+                force=args.force,
+                protect_skills=args.protect,
+            )
+        )
     elif args.command == "list":
         show_active = not args.archived or args.active
         show_archived = not args.active or args.archived
