@@ -208,10 +208,20 @@ class SkillVault:
                 if p.exists() and p not in dirs:
                     dirs.append(p)
 
+        # If base_dir is nested inside a skills folder (e.g. skills/skill-vault)
+        if self.base_dir.parent.name == "skills" and self.base_dir.parent.exists():
+            if self.base_dir.parent not in dirs:
+                dirs.append(self.base_dir.parent)
+            parent_plugins = self.base_dir.parent.parent / "plugins"
+            if parent_plugins.exists():
+                for p in parent_plugins.iterdir():
+                    if p.is_dir() and (p / "skills").exists() and (p / "skills") not in dirs:
+                        dirs.append(p / "skills")
+
         plugins_dir = self.base_dir / "plugins"
         if plugins_dir.exists():
             for p in plugins_dir.iterdir():
-                if p.is_dir() and (p / "skills").exists():
+                if p.is_dir() and (p / "skills").exists() and (p / "skills") not in dirs:
                     dirs.append(p / "skills")
         return dirs
 
@@ -925,6 +935,8 @@ class SkillVault:
 
         # Check standard global locations
         candidates = [
+            Path.home() / ".gemini" / "config" / "skills" / "skill-vault" / "skill_archive",
+            Path.home() / ".gemini" / "config" / "skills" / ".skill_archive",
             Path.home() / ".gemini" / "config" / "skill_archive",
             Path.home() / ".agents" / "skill_archive",
             Path.home() / ".claude" / "skill_archive",
