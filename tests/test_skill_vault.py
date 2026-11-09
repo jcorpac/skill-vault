@@ -443,6 +443,104 @@ class TestSkillVault(unittest.TestCase):
         archived_md = (self.archive_dir / "skills" / "forced-skill" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("version: v1", archived_md)
 
+    # --- 8. Project Import Engine Tests ---
+
+    def test_import_single_skill_to_project(self):
+        """Test importing a single skill from vault into a project directory."""
+        self._create_mock_skill(self.archive_dir / "skills", "gcp-spanner", description="Spanner skill.", version="1.0.0")
+        manifest = [{
+            "name": "gcp-spanner",
+            "category": "GCP & Data Engineering",
+            "original_path": "skills/gcp-spanner",
+            "archived_path": "skill_archive/skills/gcp-spanner",
+        }]
+        self.mgr.save_manifest(manifest)
+
+        project_dir = self.base_dir / "mock_project"
+        project_skills = project_dir / ".agents" / "skills"
+
+        exit_code = self.mgr.import_skills(
+            name="gcp-spanner",
+            dest_dir=str(project_skills),
+            vault_dir=str(self.archive_dir),
+        )
+        self.assertEqual(exit_code, 0)
+        imported_skill_md = project_skills / "gcp-spanner" / "SKILL.md"
+        self.assertTrue(imported_skill_md.exists())
+        self.assertIn("version: 1.0.0", imported_skill_md.read_text(encoding="utf-8"))
+
+    def test_import_category_to_project(self):
+        """Test importing all skills in a category from vault into a project."""
+        self._create_mock_skill(self.archive_dir / "skills", "bq-query", description="BigQuery query tool.", version="1.0")
+        self._create_mock_skill(self.archive_dir / "skills", "bq-export", description="BigQuery export tool.", version="1.0")
+        self._create_mock_skill(self.archive_dir / "skills", "chembl-tool", description="ChEMBL drug lookup.", version="1.0")
+
+        manifest = [
+            {"name": "bq-query", "category": "BigQuery & Data Warehouse", "archived_path": "skill_archive/skills/bq-query"},
+            {"name": "bq-export", "category": "BigQuery & Data Warehouse", "archived_path": "skill_archive/skills/bq-export"},
+            {"name": "chembl-tool", "category": "Science & Biomedicine", "archived_path": "skill_archive/skills/chembl-tool"},
+        ]
+        self.mgr.save_manifest(manifest)
+
+        project_skills = self.base_dir / "project2" / "skills"
+        exit_code = self.mgr.import_skills(
+            category="BigQuery & Data Warehouse",
+            dest_dir=str(project_skills),
+            vault_dir=str(self.archive_dir),
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertTrue((project_skills / "bq-query" / "SKILL.md").exists())
+        self.assertTrue((project_skills / "bq-export" / "SKILL.md").exists())
+        self.assertFalse((project_skills / "chembl-tool").exists())
+
+    def test_import_recency_and_force(self):
+        """Test importing checks recency and skips older versions unless --force is passed."""
+        self._create_mock_skill(self.archive_dir / "skills", "versioned-tool", version="1.0")
+        manifest = [{"name": "versioned-tool", "category": "Tools", "archived_path": "skill_archive/skills/versioned-tool"}]
+        self.mgr.save_manifest(manifest)
+
+        project_skills = self.base_dir / "project3" / "skills"
+        self._create_mock_skill(project_skills, "versioned-tool", version="2.0")
+
+        # Without force -> skip
+        self.mgr.import_skills(name="versioned-tool", dest_dir=str(project_skills), vault_dir=str(self.archive_dir))
+        content = (project_skills / "versioned-tool" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("version: 2.0", content)
+
+        # With force -> overwrite
+        self.mgr.import_skills(name="versioned-tool", dest_dir=str(project_skills), vault_dir=str(self.archive_dir), force=True)
+        content_forced = (project_skills / "versioned-tool" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("version: 1.0", content_forced)
+
+    def test_import_cli(self):
+        """Test import command via CLI subprocess."""
+        self._create_mock_skill(self.archive_dir / "skills", "cli-import-skill", description="CLI imported.", version="1.2.3")
+        manifest = [{"name": "cli-import-skill", "category": "General", "archived_path": "skill_archive/skills/cli-import-skill"}]
+        self.mgr.save_manifest(manifest)
+
+        dest_dir = self.base_dir / "cli_project" / "skills"
+        script_path = SCRIPT_DIR / "skill_vault.py"
+
+        res = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "--base-dir",
+                str(self.base_dir),
+                "import",
+                "cli-import-skill",
+                "--dest",
+                str(dest_dir),
+                "--vault-dir",
+                str(self.archive_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res.returncode, 0, f"CLI stderr: {res.stderr}")
+        self.assertIn("[Imported] cli-import-skill", res.stdout)
+        self.assertTrue((dest_dir / "cli-import-skill" / "SKILL.md").exists())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

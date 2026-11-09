@@ -893,6 +893,224 @@ class SkillVault:
             print(f"  Description: {desc_snippet}")
             print(f"  Path: {path_str}\n")
 
+    # --- Project Import Engine ---
+
+    def resolve_vault_archive_dir(self, vault_arg=None):
+        """Resolve the source vault archive directory."""
+        if vault_arg:
+            p = Path(vault_arg).resolve()
+            if (p / "skill_archive").exists():
+                return p / "skill_archive"
+            return p
+
+        env_vault = os.environ.get("SKILL_VAULT_DIR") or os.environ.get("SKILL_VAULT_ARCHIVE")
+        if env_vault:
+            p = Path(env_vault).resolve()
+            if (p / "skill_archive").exists():
+                return p / "skill_archive"
+            return p
+
+        env_base = os.environ.get("SKILL_VAULT_BASE") or os.environ.get("SKILL_BASE_DIR")
+        if env_base:
+            p = Path(env_base).resolve() / "skill_archive"
+            if p.exists():
+                return p
+
+        # Check self.archive_dir
+        if self.archive_dir.exists() and (
+            (self.archive_dir / "skills").exists()
+            or (self.archive_dir / "backup_manifest.json").exists()
+        ):
+            return self.archive_dir
+
+        # Check standard global locations
+        candidates = [
+            Path.home() / ".gemini" / "config" / "skill_archive",
+            Path.home() / ".agents" / "skill_archive",
+            Path.home() / ".claude" / "skill_archive",
+        ]
+        for cand in candidates:
+            if cand.exists() and (
+                (cand / "skills").exists() or (cand / "backup_manifest.json").exists()
+            ):
+                return cand
+
+        return self.archive_dir
+
+    def resolve_dest_dir(self, dest_arg=None):
+        """Resolve target destination directory for imported skills."""
+        if dest_arg:
+            p = Path(dest_arg).resolve()
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+
+        cwd = Path.cwd().resolve()
+        if (cwd / ".agents" / "skills").exists():
+            return cwd / ".agents" / "skills"
+        if (cwd / "skills").exists():
+            return cwd / "skills"
+        if (cwd / ".claude" / "skills").exists():
+            return cwd / ".claude" / "skills"
+        if (cwd / ".agents").exists():
+            p = cwd / ".agents" / "skills"
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+
+        p = cwd / "skills"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def find_vault_skill(self, skill_name, vault_archive_dir, manifest_map=None):
+        """Find the physical skill directory in a vault archive store."""
+        vault_archive_dir = Path(vault_archive_dir).resolve()
+        vault_base = (
+            vault_archive_dir.parent
+            if vault_archive_dir.name == "skill_archive"
+            else vault_archive_dir
+        )
+
+        # 1. Check via manifest if provided
+        if manifest_map and skill_name in manifest_map:
+            item = manifest_map[skill_name]
+            rel_archived = item.get("archived_path")
+            if rel_archived:
+                p1 = (vault_base / rel_archived).resolve()
+                if p1.exists() and (p1 / "SKILL.md").exists():
+                    return p1
+                p2 = (vault_archive_dir / rel_archived).resolve()
+                if p2.exists() and (p2 / "SKILL.md").exists():
+                    return p2
+                p3 = Path(rel_archived)
+                if p3.is_absolute() and p3.exists() and (p3 / "SKILL.md").exists():
+                    return p3
+
+        # 2. Check vault_archive_dir / "skills" / skill_name
+        p_std = vault_archive_dir / "skills" / skill_name
+        if p_std.exists() and (p_std / "SKILL.md").exists():
+            return p_std
+
+        # 3. Check vault_archive_dir / skill_name
+        p_direct = vault_archive_dir / skill_name
+        if p_direct.exists() and (p_direct / "SKILL.md").exists():
+            return p_direct
+
+        # 4. Check nested plugins_*_skills subdirectories
+        if vault_archive_dir.exists():
+            for child in vault_archive_dir.iterdir():
+                if child.is_dir():
+                    candidate = child / skill_name
+                    if candidate.exists() and (candidate / "SKILL.md").exists():
+                        return candidate
+
+        return None
+
+    def import_skills(
+        self,
+        name=None,
+        pattern=None,
+        category=None,
+        import_all=False,
+        dest_dir=None,
+        vault_dir=None,
+        force=False,
+        dry_run=False,
+    ):
+        """Import skills from a vault (global archive or specified) into a project destination."""
+        vault_archive_dir = self.resolve_vault_archive_dir(vault_dir)
+        dest_path = self.resolve_dest_dir(dest_dir)
+
+        if not vault_archive_dir.exists():
+            print(f"[Error] Vault archive directory does not exist: {vault_archive_dir}")
+            return 1
+
+        # Load vault manifest if present
+        manifest_file = vault_archive_dir / "backup_manifest.json"
+        vault_manifest = []
+        if manifest_file.exists():
+            try:
+                with open(manifest_file, "r", encoding="utf-8") as f:
+                    vault_manifest = json.load(f)
+            except Exception as e:
+                print(f"[Warning] Could not parse vault manifest at {manifest_file}: {e}")
+
+        manifest_map = {item["name"]: item for item in vault_manifest if "name" in item}
+
+        targets = []
+        if import_all:
+            if manifest_map:
+                targets = sorted(manifest_map.keys())
+            else:
+                skills_base = vault_archive_dir / "skills"
+                if skills_base.exists():
+                    targets = sorted([d.name for d in skills_base.iterdir() if d.is_dir() and (d / "SKILL.md").exists()])
+        elif category:
+            cat_lower = category.strip().lower()
+            if manifest_map:
+                targets = sorted([n for n, item in manifest_map.items() if item.get("category", "").lower() == cat_lower])
+            if not targets:
+                print(f"[Warning] No skills found matching category '{category}' in vault manifest.")
+        elif pattern:
+            regex = re.compile(pattern.replace("*", ".*"))
+            if manifest_map:
+                targets = sorted([n for n in manifest_map.keys() if regex.match(n)])
+            else:
+                skills_base = vault_archive_dir / "skills"
+                if skills_base.exists():
+                    targets = sorted([d.name for d in skills_base.iterdir() if d.is_dir() and regex.match(d.name)])
+        elif name:
+            targets = [name.strip()]
+        else:
+            print("Please specify a skill name, --category, --pattern, or --all to import.")
+            return 1
+
+        if not targets:
+            print("No matching skills found in vault to import.")
+            return 1
+
+        imported_count = 0
+        skipped_count = 0
+        error_count = 0
+
+        print("==================================================")
+        print("            SKILL VAULT PROJECT IMPORT")
+        print(f"  Source Vault: {vault_archive_dir}")
+        print(f"  Target Dest:  {dest_path}")
+        print("==================================================\n")
+
+        for skill_name in targets:
+            source_skill_dir = self.find_vault_skill(skill_name, vault_archive_dir, manifest_map)
+            if not source_skill_dir:
+                print(f"[Error] Skill '{skill_name}' not found in vault ({vault_archive_dir})")
+                error_count += 1
+                continue
+
+            target_skill_dir = dest_path / skill_name
+
+            if target_skill_dir.exists():
+                recency = compare_skill_recency(source_skill_dir, target_skill_dir)
+                if recency <= 0 and not force:
+                    print(f"[Skip] Project skill '{skill_name}' is already newer than or equal to vault version (use --force to overwrite)")
+                    skipped_count += 1
+                    continue
+                else:
+                    if dry_run:
+                        print(f"[Dry Run] Would update project skill with newer vault version: {skill_name} -> {target_skill_dir}")
+                    else:
+                        shutil.rmtree(target_skill_dir)
+                        shutil.copytree(source_skill_dir, target_skill_dir)
+                        print(f"[Imported] Updated project skill with newer vault version: {skill_name} -> {target_skill_dir}")
+                    imported_count += 1
+            else:
+                if dry_run:
+                    print(f"[Dry Run] Would import: {skill_name} -> {target_skill_dir}")
+                else:
+                    shutil.copytree(source_skill_dir, target_skill_dir)
+                    print(f"[Imported] {skill_name} -> {target_skill_dir}")
+                imported_count += 1
+
+        print(f"\n[OK] Import completed: {imported_count} imported, {skipped_count} skipped, {error_count} errors.")
+        return 0 if error_count == 0 else 1
+
 
 def main():
     parser = argparse.ArgumentParser(description="Skill Vault: Universal Agent Skill Lifecycle & Storage Manager")
@@ -953,6 +1171,17 @@ def main():
     p_srch = subparsers.add_parser("search", help="Search archived skills by keyword, intent, or domain")
     p_srch.add_argument("query", help="Keyword to search for")
 
+    # Import
+    p_imp = subparsers.add_parser("import", help="Import skills from vault into project or target directory")
+    p_imp.add_argument("name", nargs="?", help="Specific skill name to import")
+    p_imp.add_argument("--pattern", help="Glob pattern of skills to import (e.g. 'gcp-*')")
+    p_imp.add_argument("--category", help="Import all skills in a category")
+    p_imp.add_argument("--all", action="store_true", help="Import all skills from the vault")
+    p_imp.add_argument("--dest", help="Destination directory in project (default: ./skills or ./.agents/skills)")
+    p_imp.add_argument("--vault-dir", help="Explicit source vault archive directory")
+    p_imp.add_argument("--force", action="store_true", help="Overwrite existing skill in project regardless of recency")
+    p_imp.add_argument("--dry-run", action="store_true", help="Preview skills that would be imported without copying")
+
     args = parser.parse_args()
     mgr = SkillVault(base_dir=args.base_dir)
 
@@ -989,6 +1218,19 @@ def main():
         sys.exit(mgr.verify(fix=args.fix))
     elif args.command == "search":
         mgr.search(query=args.query)
+    elif args.command == "import":
+        sys.exit(
+            mgr.import_skills(
+                name=args.name,
+                pattern=args.pattern,
+                category=args.category,
+                import_all=args.all,
+                dest_dir=args.dest,
+                vault_dir=args.vault_dir,
+                force=args.force,
+                dry_run=args.dry_run,
+            )
+        )
 
 
 if __name__ == "__main__":

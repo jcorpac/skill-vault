@@ -150,6 +150,28 @@ Skill Vault automatically protects newer skills and prevents regressions when ar
    - **`optimize`**: Automatically detects and upgrades active L1 skills if newer versions exist in the vault, while archiving unneeded skills safely.
    - **`--force`**: Bypasses recency checks on `archive`, `restore`, or `optimize` when an intentional overwrite is required.
 
+### J. Project-Level Skill Importing
+To import skills from a global vault (e.g., `~/.gemini/config/skill_archive` or `$SKILL_VAULT_BASE`) into a project workspace on demand:
+```bash
+# Import a specific skill into the current project (defaults to ./skills or ./.agents/skills)
+python scripts/skill_vault.py import <skill_name>
+
+# Import all skills in a category into the current project
+python scripts/skill_vault.py import --category "BigQuery & Data Warehouse"
+
+# Import matching skills via glob pattern
+python scripts/skill_vault.py import --pattern "gcp-*"
+
+# Import into an explicit project destination
+python scripts/skill_vault.py import <skill_name> --dest "./.agents/skills"
+
+# Preview what would be imported without copying
+python scripts/skill_vault.py import <skill_name> --dry-run
+
+# Force overwrite of project skill if already present
+python scripts/skill_vault.py import <skill_name> --force
+```
+
 ---
 
 ## 3. Environment & OS Compatibility Guidelines
