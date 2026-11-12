@@ -530,7 +530,16 @@ class SkillVault:
 
     def infer_category(self, skill_name, skill_desc=""):
         """Infer an appropriate category for a new skill based on name and description keywords."""
+        if skill_name in DEFAULT_CORE_SKILLS:
+            return "General & Utility Skills"
+        if skill_name.startswith("egm-") or "egm" in skill_name:
+            return "Knowledge & Wiki Architecture"
+        if skill_name in ["gmail", "gcalendar", "gslides", "gdocs", "gdrive", "gsheets"]:
+            return "General & Utility Skills"
+
         text = f"{skill_name} {skill_desc}".lower()
+        if any(k in skill_name for k in ["gemini", "adk", "live-api", "vertex"]):
+            return "Gemini API & AI Agents"
         if any(k in text for k in ["gemini", "adk", "live api", "llm agent", "vertex ai"]):
             return "Gemini API & AI Agents"
         if any(k in text for k in ["android", "gradle", "apk", "adb"]):
@@ -571,6 +580,10 @@ class SkillVault:
         retained_core = []
 
         for name, data in sorted(active_skills.items()):
+            if name == "skill-vault":
+                retained_core.append(name)
+                continue
+
             active_path = Path(data["path"])
             is_core = name in core_set
 
@@ -617,7 +630,10 @@ class SkillVault:
         total_ingested = 0
         items_to_write = to_ingest_new + to_ingest_update
         for name, data, cat in items_to_write:
-            active_path = Path(data["path"])
+            active_path = Path(data["path"]).resolve()
+            if self.archive_dir in active_path.parents or active_path == self.base_dir:
+                continue
+
             if name in manifest_map and manifest_map[name].get("archived_path"):
                 dest = self.resolve_portable_path(manifest_map[name]["archived_path"])
             else:
