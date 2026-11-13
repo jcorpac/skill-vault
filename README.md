@@ -104,6 +104,12 @@ python scripts/skill_vault.py verify
 | `skill-vault import <name> --vault-dir <path>` | Import from an explicit source vault (defaults to global archive or base). |
 | `skill-vault import <name> --force` | Overwrite existing project skill regardless of recency. |
 | `skill-vault import <name> --dry-run` | Preview what would be imported without copying files. |
+| `skill-vault config --show` | Inspect effective core skills, stack fingerprints, and category rules. |
+| `skill-vault config --init` | Write `skill_archive/vault_config.json` with universal defaults for customization. |
+| `skill-vault config --add-core <name>` | Add a skill to protected Core Foundation Skills (or use `--remove-core`). |
+| `skill-vault config --add-fingerprint "<Cat>" "<pat>"` | Add a workspace file/glob fingerprint to a skill category. |
+| `skill-vault config --add-category-rule "<Cat>" "<kw>"` | Add a keyword rule for automatic skill categorization. |
+| `skill-vault config --sync-prompt` | Dynamically update `SKILL.md`'s router description with your vault's categories. |
 | `skill-vault verify` | Audit bi-directional consistency across disk, manifest, and index. |
 | `skill-vault verify --fix` | Audit and automatically self-heal all detected discrepancies. |
 
@@ -116,6 +122,8 @@ python scripts/skill_vault.py verify
 3. **Zero Runtime Dependencies**: The core engine requires only Python 3 standard library (`os`, `sys`, `json`, `re`, `shutil`, `hashlib`, `argparse`, `pathlib`).
 4. **Self-Healing Integrity**: Detects orphaned folders, phantom manifest entries, broken markdown links, and duplicate aliases.
 5. **Recency & Version Prioritization**: Automatically protects newer versions when archiving, restoring, or optimizing by evaluating semantic version tags (`version:`) with filesystem timestamp (`mtime`) fallbacks. Use `--force` to override.
+6. **Universal Cross-Ecosystem Stack Detection**: Includes built-in workspace fingerprinting and category inference across Frontend, Backend, Cloud/DevOps, Databases, Mobile, AI/ML, Testing/Security, Data Engineering, and Science — fully extensible via `vault_config.json` and `SKILL.md` frontmatter (`core: true`, `category:`).
+7. **Dynamic Router Prompt Syncing**: `reindex` and `config --sync-prompt` automatically keep `skill-vault`'s `SKILL.md` frontmatter description synchronized with the exact skills and categories in the user's own vault.
 
 ---
 

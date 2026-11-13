@@ -26,6 +26,62 @@ DEFAULT_CORE_SKILLS = {
 
 # Workspace fingerprint signatures mapping to skill categories
 WORKSPACE_FINGERPRINTS = {
+    "Frontend & Web Development": [
+        "package.json",
+        "tsconfig.json",
+        "next.config.*",
+        "vite.config.*",
+        "angular.json",
+        "svelte.config.*",
+        "tailwind.config.*",
+    ],
+    "Backend & APIs": [
+        "pyproject.toml",
+        "requirements.txt",
+        "go.mod",
+        "Cargo.toml",
+        "pom.xml",
+        "Gemfile",
+        "composer.json",
+        "openapi.yaml",
+        "swagger.json",
+    ],
+    "Cloud & DevOps": [
+        "Dockerfile",
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "*.tf",
+        "Chart.yaml",
+        "Pulumi.yaml",
+        "serverless.yml",
+    ],
+    "Databases & Storage": [
+        "schema.prisma",
+        "drizzle.config.*",
+        "alembic.ini",
+        "flyway.conf",
+        "*.sql",
+    ],
+    "Mobile & Cross-Platform": [
+        "pubspec.yaml",
+        "Podfile",
+        "Package.swift",
+        "app.json",
+        "metro.config.js",
+    ],
+    "AI, LLM & Machine Learning": [
+        "*.ipynb",
+        "MLproject",
+        "conda.yaml",
+        "dvc.yaml",
+    ],
+    "Testing, QA & Security": [
+        "playwright.config.*",
+        "cypress.config.*",
+        "vitest.config.*",
+        "jest.config.*",
+        "pytest.ini",
+    ],
     "BigQuery & Data Warehouse": [
         "dbt_project.yml",
         "dataform.json",
@@ -64,6 +120,186 @@ WORKSPACE_FINGERPRINTS = {
         "build.gradle",
         "build.gradle.kts",
         "AndroidManifest.xml",
+    ],
+}
+
+DEFAULT_WORKSPACE_FINGERPRINTS = WORKSPACE_FINGERPRINTS
+
+# Default keyword rules for auto-categorizing skills across universal ecosystems
+DEFAULT_CATEGORY_RULES = {
+    "Knowledge & Wiki Architecture": [
+        "egm-",
+        "wiki",
+        "documentation architecture",
+    ],
+    "Gemini API & AI Agents": [
+        "gemini",
+        "adk",
+        "live-api",
+        "live api",
+        "llm agent",
+        "vertex ai",
+        "vertex",
+    ],
+    "Android Development": [
+        "android",
+        "gradle",
+        "apk",
+        "adb",
+        "jetpack compose",
+    ],
+    "BigQuery & Data Warehouse": [
+        "bigquery",
+        "dbt",
+        "dataform",
+        "data warehouse",
+        "lakehouse",
+    ],
+    "AlloyDB": [
+        "alloydb",
+        "omni",
+    ],
+    "Databases & Storage": [
+        "prisma",
+        "drizzle",
+        "sqlalchemy",
+        "redis",
+        "mongodb",
+        "dynamodb",
+        "cassandra",
+        "clickhouse",
+        "supabase",
+        "sqlite",
+        "vector db",
+        "pinecone",
+        "qdrant",
+    ],
+    "Cloud SQL": [
+        "cloud sql",
+        "cloudsql",
+        "postgres",
+        "postgresql",
+        "mysql",
+    ],
+    "Science & Biomedicine": [
+        "protein",
+        "alphafold",
+        "pdb",
+        "dna",
+        "rna",
+        "chembl",
+        "bioinformatics",
+        "variant",
+        "genome",
+        "pymol",
+        "foldseek",
+        "pubmed",
+    ],
+    "GCP & Data Engineering": [
+        "gcp",
+        "airflow",
+        "composer",
+        "spanner",
+        "dataflow",
+        "dataproc",
+        "pubsub",
+        "cloud storage",
+        "cloud run",
+    ],
+    "Testing, QA & Security": [
+        "playwright",
+        "cypress",
+        "jest",
+        "vitest",
+        "pytest",
+        "selenium",
+        "e2e",
+        "unit test",
+        "tdd",
+        "owasp",
+        "pentest",
+        "vulnerability",
+        "security audit",
+    ],
+    "Mobile & Cross-Platform": [
+        "flutter",
+        "dart",
+        "swift",
+        "swiftui",
+        "ios",
+        "xcode",
+        "react native",
+        "expo",
+        "kotlin multiplatform",
+    ],
+    "Frontend & Web Development": [
+        "react",
+        "nextjs",
+        "next.js",
+        "vue",
+        "svelte",
+        "angular",
+        "tailwind",
+        "css",
+        "frontend",
+        "vite",
+        "webpack",
+        "dom",
+        "a11y",
+        "accessibility",
+    ],
+    "Cloud & DevOps": [
+        "aws",
+        "azure",
+        "kubernetes",
+        "k8s",
+        "helm",
+        "docker",
+        "terraform",
+        "pulumi",
+        "ansible",
+        "github actions",
+        "ci/cd",
+        "cloudflare",
+        "vercel",
+        "netlify",
+        "devops",
+        "prometheus",
+        "grafana",
+    ],
+    "AI, LLM & Machine Learning": [
+        "openai",
+        "anthropic",
+        "claude",
+        "langchain",
+        "llamaindex",
+        "huggingface",
+        "pytorch",
+        "tensorflow",
+        "rag",
+        "embeddings",
+        "fine-tuning",
+        "machine learning",
+        "deep learning",
+    ],
+    "Backend & APIs": [
+        "fastapi",
+        "flask",
+        "django",
+        "express",
+        "nestjs",
+        "graphql",
+        "rest api",
+        "grpc",
+        "golang",
+        "rust",
+        "spring boot",
+        "rails",
+        "microservice",
+        "backend",
+        "oauth",
+        "jwt",
+        "stripe",
     ],
 }
 
@@ -175,7 +411,102 @@ class SkillVault:
         self.archive_dir = self.base_dir / "skill_archive"
         self.manifest_file = self.archive_dir / "backup_manifest.json"
         self.index_file = self.archive_dir / "INDEX.md"
+        self.config_file = self.archive_dir / "vault_config.json"
         self.skills_dir = self.base_dir / "skills"
+
+    def _load_raw_config(self):
+        """Read raw vault_config.json without creating files or merging defaults."""
+        if self.config_file.exists():
+            try:
+                with open(self.config_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data if isinstance(data, dict) else {}
+            except Exception as e:
+                print(f"[Warning] Failed to parse {self.config_file}: {e}")
+        return {}
+
+    def load_config(self):
+        """Load vault_config.json if present and merge with universal defaults."""
+        user_cfg = self._load_raw_config()
+
+        disabled_core = set(user_cfg.get("disabled_core_skills", []))
+        core_skills = (set(DEFAULT_CORE_SKILLS) | set(user_cfg.get("core_skills", []))) - disabled_core
+
+        merged_fp = {cat: list(pats) for cat, pats in WORKSPACE_FINGERPRINTS.items()}
+        for cat, pats in user_cfg.get("workspace_fingerprints", {}).items():
+            if cat in merged_fp:
+                merged_fp[cat] = list(dict.fromkeys(list(pats) + merged_fp[cat]))
+            else:
+                merged_fp[cat] = list(pats)
+
+        custom_rules = user_cfg.get("category_rules", {})
+        merged_rules = {}
+        # Evaluate non-default custom categories first so user overrides take precedence
+        for cat, kws in custom_rules.items():
+            if cat not in DEFAULT_CATEGORY_RULES:
+                merged_rules[cat] = list(kws)
+        for cat, kws in custom_rules.items():
+            if cat in DEFAULT_CATEGORY_RULES:
+                merged_rules[cat] = list(dict.fromkeys(list(kws) + list(DEFAULT_CATEGORY_RULES[cat])))
+        for cat, kws in DEFAULT_CATEGORY_RULES.items():
+            if cat not in merged_rules:
+                merged_rules[cat] = list(kws)
+
+        return {
+            "core_skills": sorted(core_skills),
+            "disabled_core_skills": sorted(disabled_core),
+            "workspace_fingerprints": merged_fp,
+            "category_rules": merged_rules,
+        }
+
+    def save_config(self, config_data):
+        """Persist configuration to vault_config.json."""
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
+        with open(self.config_file, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=2, ensure_ascii=False)
+
+    def get_core_skills(self, extra_protected=None):
+        """Return effective set of protected core skill names."""
+        core_set = set(self.load_config()["core_skills"])
+        if extra_protected:
+            core_set.update(extra_protected)
+        return core_set
+
+    def parse_skill_frontmatter_field(self, skill_md_path, field_name):
+        """Extract a single scalar field from SKILL.md YAML frontmatter."""
+        skill_md_path = Path(skill_md_path)
+        if not skill_md_path.exists():
+            return None
+        try:
+            content = skill_md_path.read_text(encoding="utf-8", errors="ignore")
+            fm_match = re.search(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+            if fm_match:
+                pattern = rf"^{re.escape(field_name)}:\s*([^\n]+)"
+                match = re.search(pattern, fm_match.group(1), re.MULTILINE | re.IGNORECASE)
+                if match:
+                    val = match.group(1).strip().strip("'\"")
+                    return val if val else None
+        except Exception:
+            pass
+        return None
+
+    def is_core_skill_frontmatter(self, skill_md_path):
+        """Return True if SKILL.md frontmatter marks the skill as core/pinned/always_active."""
+        for field in ("core", "pinned", "always_active"):
+            val = self.parse_skill_frontmatter_field(skill_md_path, field)
+            if val and val.strip().lower() in {"true", "yes", "1"}:
+                return True
+        return False
+
+    def _keyword_matches(self, keyword, text, normalized_text):
+        """Match a category keyword against skill name/description text safely."""
+        kw = str(keyword).lower().strip()
+        if not kw:
+            return False
+        if kw.isalpha() and len(kw) <= 4:
+            pattern = rf"(?<![a-z]){re.escape(kw)}(?![a-z])"
+            return bool(re.search(pattern, text) or re.search(pattern, normalized_text))
+        return kw in text or kw in normalized_text
 
     def init(self):
         """Bootstrap standard directory structure for a new workspace or repository."""
@@ -402,8 +733,10 @@ class SkillVault:
         """Inspect workspace files and return matched skill categories."""
         target_ws = Path(workspace_path).resolve() if workspace_path else Path.cwd().resolve()
         matched = {}
+        config = self.load_config()
+        fingerprints = config["workspace_fingerprints"]
 
-        for category, patterns in WORKSPACE_FINGERPRINTS.items():
+        for category, patterns in fingerprints.items():
             for pat in patterns:
                 if "*" in pat:
                     matches = list(target_ws.glob(pat)) + list(target_ws.glob(f"**/{pat}"))[:5]
@@ -415,6 +748,36 @@ class SkillVault:
                         matched.setdefault(category, []).append(pat)
                         break
 
+        # Inspect categories present in manifest for workspace filename/directory keyword matches
+        manifest = self.load_manifest()
+        manifest_categories = {m.get("category") for m in manifest if m.get("category")}
+        unmatched_cats = [c for c in sorted(manifest_categories) if c not in matched]
+        if unmatched_cats and target_ws.exists():
+            stop_words = {"and", "the", "skills", "general", "utility"}
+            ignored_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", ".tox", "dist", "build"}
+            ws_tokens = {}
+            for root, dirs, files in os.walk(target_ws):
+                dirs[:] = [d for d in dirs if d not in ignored_dirs]
+                rel_depth = len(Path(root).relative_to(target_ws).parts)
+                if rel_depth > 3:
+                    dirs[:] = []
+                    continue
+                for entry_name in dirs + files:
+                    tokens = {t for t in re.split(r"[-_.\s]+", entry_name.lower()) if t}
+                    for tok in tokens:
+                        ws_tokens.setdefault(tok, entry_name)
+
+            for cat in unmatched_cats:
+                words = [
+                    w.lower()
+                    for w in re.findall(r"[a-zA-Z0-9]+", cat)
+                    if len(w) > 2 and w.lower() not in stop_words
+                ]
+                for w in words:
+                    if w in ws_tokens:
+                        matched.setdefault(cat, []).append(ws_tokens[w])
+                        break
+
         return matched
 
     def optimize(self, workspace_path=None, protected_skills=None, dry_run=False, force=False):
@@ -424,9 +787,7 @@ class SkillVault:
         prioritizing newer versions when versions overlap.
         """
         target_ws = Path(workspace_path).resolve() if workspace_path else Path.cwd().resolve()
-        core_set = set(DEFAULT_CORE_SKILLS)
-        if protected_skills:
-            core_set.update(protected_skills)
+        core_set = self.get_core_skills(protected_skills)
 
         print("==================================================")
         print("          SKILL VAULT AUTO-OPTIMIZATION")
@@ -452,10 +813,15 @@ class SkillVault:
         to_keep = []
 
         for name, data in active_map.items():
+            skill_md_path = Path(data["path"]) / "SKILL.md"
             if name in core_set:
                 to_keep.append((name, "Core Foundation Skill"))
+            elif self.is_core_skill_frontmatter(skill_md_path):
+                to_keep.append((name, "Core Foundation Skill (Pinned in Frontmatter)"))
             else:
-                skill_cat = manifest_by_name.get(name, {}).get("category", "General & Utility Skills")
+                skill_cat = manifest_by_name.get(name, {}).get("category") or self.infer_category(
+                    name, data["description"], skill_md_path
+                )
                 if skill_cat in detected_categories:
                     to_keep.append((name, f"Matched Stack ({skill_cat})"))
                 else:
@@ -528,32 +894,38 @@ class SkillVault:
 
     # --- Sync & Ingestion Engine ---
 
-    def infer_category(self, skill_name, skill_desc=""):
-        """Infer an appropriate category for a new skill based on name and description keywords."""
-        if skill_name in DEFAULT_CORE_SKILLS:
-            return "General & Utility Skills"
-        if skill_name.startswith("egm-") or "egm" in skill_name:
-            return "Knowledge & Wiki Architecture"
-        if skill_name in ["gmail", "gcalendar", "gslides", "gdocs", "gdrive", "gsheets"]:
+    def infer_category(self, skill_name, skill_desc="", skill_md_path=None):
+        """Infer an appropriate category for a skill via frontmatter, custom rules, or universal defaults."""
+        resolved_md = Path(skill_md_path) if skill_md_path else None
+        if resolved_md is None:
+            active_dir = self.find_active_skill(skill_name)
+            if active_dir:
+                resolved_md = active_dir / "SKILL.md"
+
+        if resolved_md is not None:
+            explicit_cat = self.parse_skill_frontmatter_field(resolved_md, "category")
+            if explicit_cat:
+                return explicit_cat
+
+        if skill_name in self.get_core_skills() or skill_name in [
+            "gmail",
+            "gcalendar",
+            "gslides",
+            "gdocs",
+            "gdrive",
+            "gsheets",
+        ]:
             return "General & Utility Skills"
 
+        rules = self.load_config()["category_rules"]
         text = f"{skill_name} {skill_desc}".lower()
-        if any(k in skill_name for k in ["gemini", "adk", "live-api", "vertex"]):
-            return "Gemini API & AI Agents"
-        if any(k in text for k in ["gemini", "adk", "live api", "llm agent", "vertex ai"]):
-            return "Gemini API & AI Agents"
-        if any(k in text for k in ["android", "gradle", "apk", "adb"]):
-            return "Android Development"
-        if any(k in text for k in ["bigquery", "dbt", "dataform", "data warehouse", "lakehouse"]):
-            return "BigQuery & Data Warehouse"
-        if any(k in text for k in ["alloydb", "omni"]):
-            return "AlloyDB"
-        if any(k in text for k in ["cloud sql", "postgres", "mysql"]):
-            return "Cloud SQL"
-        if any(k in text for k in ["protein", "alphafold", "pdb", "dna", "rna", "chembl", "bioinformatics", "variant", "genome", "pymol"]):
-            return "Science & Biomedicine"
-        if any(k in text for k in ["gcp", "airflow", "composer", "spanner", "dataflow", "dataproc", "pubsub", "cloud storage"]):
-            return "GCP & Data Engineering"
+        normalized_text = re.sub(r"[-_]+", " ", text)
+
+        for cat, keywords in rules.items():
+            for kw in keywords:
+                if self._keyword_matches(kw, text, normalized_text):
+                    return cat
+
         return "General & Utility Skills"
 
     def sync(self, dry_run=False, keep_active=False, force=False, protect_skills=None):
@@ -565,9 +937,7 @@ class SkillVault:
         print(f"  Vault Store:    {self.archive_dir}")
         print("==================================================\n")
 
-        core_set = set(DEFAULT_CORE_SKILLS)
-        if protect_skills:
-            core_set.update(protect_skills)
+        core_set = self.get_core_skills(protect_skills)
 
         active_skills = self.get_active_skills()
         manifest = self.load_manifest()
@@ -585,7 +955,8 @@ class SkillVault:
                 continue
 
             active_path = Path(data["path"])
-            is_core = name in core_set
+            skill_md_path = active_path / "SKILL.md"
+            is_core = (name in core_set) or self.is_core_skill_frontmatter(skill_md_path)
 
             if name in manifest_map:
                 item = manifest_map[name]
@@ -595,11 +966,17 @@ class SkillVault:
 
                 recency = compare_skill_recency(active_path, archived_path)
                 if recency > 0 or force:
-                    to_ingest_update.append((name, data, item.get("category") or self.infer_category(name, data["description"])))
+                    to_ingest_update.append(
+                        (
+                            name,
+                            data,
+                            item.get("category") or self.infer_category(name, data["description"], skill_md_path),
+                        )
+                    )
                 else:
                     in_sync.append(name)
             else:
-                assigned_cat = self.infer_category(name, data["description"])
+                assigned_cat = self.infer_category(name, data["description"], skill_md_path)
                 to_ingest_new.append((name, data, assigned_cat))
 
             if is_core:
@@ -814,7 +1191,12 @@ class SkillVault:
             shutil.copytree(active_path, dest_dir)
 
             existing_cat = manifest_map.get(skill_name, {}).get("category")
-            assigned_cat = category_name or existing_cat or "General & Utility Skills"
+            inferred_cat = self.infer_category(
+                skill_name,
+                self.parse_skill_description(active_path / "SKILL.md"),
+                active_path / "SKILL.md",
+            )
+            assigned_cat = category_name or existing_cat or inferred_cat
 
             manifest_map[skill_name] = {
                 "name": skill_name,
@@ -954,7 +1336,223 @@ class SkillVault:
             f.write("\n".join(lines).strip() + "\n")
 
         self.save_manifest(list(manifest_by_folder.values()))
+        updated_routers = self.sync_router_md()
+        for r_path in updated_routers:
+            print(f"[Router Synced] Updated SKILL.md frontmatter: {r_path}")
         print(f"[Reindexed] {total_count} skills across {len(categories)} categories (Base: {self.base_dir}).")
+
+    def build_router_description(self):
+        """Build a dynamic SKILL.md router description from the current archive manifest."""
+        manifest = self.load_manifest()
+        if not manifest:
+            return (
+                "Universal agent-agnostic skill router, lifecycle manager, and tiered storage engine for AI coding agents.\n"
+                "  ALWAYS use this skill whenever a task involves specialized domain skills, frameworks, or tools not currently loaded in active context memory (L1), or when managing skill context bloat.\n"
+                "  Search cold storage (L2) on demand via 'python scripts/skill_vault.py search \"<keyword>\"', view 'skill_archive/INDEX.md', or dynamically mount skills via 'restore', 'import', or 'optimize'."
+            )
+
+        grouped = {}
+        for item in manifest:
+            cat = item.get("category") or "General & Utility Skills"
+            grouped.setdefault(cat, []).append(item["name"])
+
+        sorted_cats = sorted(
+            grouped.keys(),
+            key=lambda c: (c == "General & Utility Skills", c.lower()),
+        )
+        cat_entries = []
+        for idx, cat in enumerate(sorted_cats, start=1):
+            samples = ", ".join(sorted(grouped[cat], key=str.lower)[:4])
+            cat_entries.append(f"({idx}) {cat} ({samples})")
+        formatted_categories = ",\n  ".join(cat_entries)
+
+        return (
+            f"Universal agent-agnostic skill router and tiered storage manager for {len(manifest)} specialized domain skill(s) in cold storage.\n"
+            f"  ALWAYS use this skill whenever the task involves domains or tools not in active memory, including:\n"
+            f"  {formatted_categories}.\n"
+            f"  Search or restore skills on demand via 'python scripts/skill_vault.py search \"<keyword>\"', view 'skill_archive/INDEX.md', or run 'restore <name>'."
+        )
+
+    def _get_router_skill_md_candidates(self):
+        """Locate candidate SKILL.md files belonging to skill-vault within base_dir."""
+        raw_candidates = [
+            self.skills_dir / "skill-vault" / "SKILL.md",
+            self.base_dir / ".agents" / "skills" / "skill-vault" / "SKILL.md",
+            self.base_dir / ".claude" / "skills" / "skill-vault" / "SKILL.md",
+        ]
+        if self.archive_dir.exists():
+            raw_candidates.append(self.base_dir / "SKILL.md")
+
+        seen = set()
+        candidates = []
+        for cand in raw_candidates:
+            resolved = cand.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                candidates.append(cand)
+        return candidates
+
+    def sync_router_md(self, target_skill_md=None, force=False):
+        """Synchronize skill-vault's SKILL.md frontmatter description with the active vault categories."""
+        candidates = [Path(target_skill_md)] if target_skill_md else self._get_router_skill_md_candidates()
+        new_desc = self.build_router_description()
+        new_desc_block = f"description: >-\n  {new_desc}"
+        desc_pattern = re.compile(
+            r"^description:\s*(?:>[-+]?|\|[-+]?)?\s*\n?.*?(?=\n[a-zA-Z0-9_-]+:|\Z)",
+            re.DOTALL | re.MULTILINE,
+        )
+
+        updated = []
+        for cand in candidates:
+            if not cand.exists() or self.parse_skill_name(cand) != "skill-vault":
+                continue
+
+            current_desc = self.parse_skill_description(cand)
+            if not force and "Universal agent-agnostic skill router" not in current_desc:
+                continue
+
+            content = cand.read_text(encoding="utf-8", errors="replace")
+            fm_match = re.match(r"^(---\s*\n)(.*?)(\n---(?:\s*\n|\s*\Z))", content, re.DOTALL)
+            if not fm_match:
+                continue
+
+            fm_text = fm_match.group(2)
+            if desc_pattern.search(fm_text):
+                new_fm = desc_pattern.sub(lambda _: new_desc_block, fm_text, count=1)
+            else:
+                new_fm = fm_text.rstrip() + "\n" + new_desc_block
+
+            new_content = fm_match.group(1) + new_fm + fm_match.group(3) + content[fm_match.end():]
+            if new_content != content:
+                cand.write_text(new_content, encoding="utf-8")
+                updated.append(cand)
+
+        return updated
+
+    def manage_config(
+        self,
+        show=False,
+        init_config=False,
+        add_core=None,
+        remove_core=None,
+        add_fingerprint=None,
+        add_category_rule=None,
+        sync_prompt=False,
+    ):
+        """Inspect or update vault_config.json and dynamically synchronize the router prompt."""
+        def _normalize_pairs(pairs):
+            if not pairs:
+                return []
+            if len(pairs) == 2 and isinstance(pairs[0], str) and isinstance(pairs[1], str):
+                return [pairs]
+            return pairs
+
+        fp_pairs = _normalize_pairs(add_fingerprint)
+        rule_pairs = _normalize_pairs(add_category_rule)
+        mutating = bool(init_config or add_core or remove_core or fp_pairs or rule_pairs)
+
+        if init_config:
+            effective = self.load_config()
+            self.save_config(effective)
+            print(f"[Config Initialized] Wrote vault configuration to: {self.config_file}")
+
+        if add_core or remove_core or fp_pairs or rule_pairs:
+            raw_cfg = self._load_raw_config()
+
+            if add_core:
+                core_list = list(raw_cfg.get("core_skills", []))
+                disabled_list = list(raw_cfg.get("disabled_core_skills", []))
+                for skill in add_core:
+                    s = skill.strip()
+                    if not s:
+                        continue
+                    if s in disabled_list:
+                        disabled_list.remove(s)
+                    if s not in core_list and s not in DEFAULT_CORE_SKILLS:
+                        core_list.append(s)
+                    elif s not in core_list and self.config_file.exists():
+                        core_list.append(s)
+                raw_cfg["core_skills"] = core_list
+                if disabled_list or "disabled_core_skills" in raw_cfg:
+                    raw_cfg["disabled_core_skills"] = disabled_list
+                print(f"[Config Updated] Added core skill(s): {', '.join(add_core)}")
+
+            if remove_core:
+                core_list = list(raw_cfg.get("core_skills", []))
+                disabled_list = list(raw_cfg.get("disabled_core_skills", []))
+                for skill in remove_core:
+                    s = skill.strip()
+                    if not s:
+                        continue
+                    if s in core_list:
+                        core_list.remove(s)
+                    if s in DEFAULT_CORE_SKILLS and s not in disabled_list:
+                        disabled_list.append(s)
+                raw_cfg["core_skills"] = core_list
+                raw_cfg["disabled_core_skills"] = disabled_list
+                print(f"[Config Updated] Removed core skill(s): {', '.join(remove_core)}")
+
+            if fp_pairs:
+                fp_map = dict(raw_cfg.get("workspace_fingerprints", {}))
+                for cat, pat in fp_pairs:
+                    c = cat.strip()
+                    p = pat.strip()
+                    if not c or not p:
+                        continue
+                    pats = list(fp_map.get(c, []))
+                    if p not in pats:
+                        pats.append(p)
+                    fp_map[c] = pats
+                    print(f"[Config Updated] Added workspace fingerprint: [{c}] -> '{p}'")
+                raw_cfg["workspace_fingerprints"] = fp_map
+
+            if rule_pairs:
+                rule_map = dict(raw_cfg.get("category_rules", {}))
+                for cat, kw in rule_pairs:
+                    c = cat.strip()
+                    k = kw.strip()
+                    if not c or not k:
+                        continue
+                    kws = list(rule_map.get(c, []))
+                    if k not in kws:
+                        kws.append(k)
+                    # Place updated custom category first so overrides take precedence
+                    rule_map = {c: kws, **{existing_c: existing_kws for existing_c, existing_kws in rule_map.items() if existing_c != c}}
+                    print(f"[Config Updated] Added category rule: [{c}] <- '{k}'")
+                raw_cfg["category_rules"] = rule_map
+
+            self.save_config(raw_cfg)
+
+        if sync_prompt:
+            updated = self.sync_router_md(force=True)
+            if updated:
+                for p in updated:
+                    print(f"[Router Synced] Updated SKILL.md frontmatter: {p}")
+            else:
+                print("[Router Sync] No matching skill-vault SKILL.md found to update.")
+
+        if show or (not mutating and not sync_prompt):
+            effective = self.load_config()
+            config_status = "Custom (vault_config.json present)" if self.config_file.exists() else "Built-in Universal Defaults (no vault_config.json)"
+            router_cands = [str(p) for p in self._get_router_skill_md_candidates() if p.exists()]
+            print("==================================================")
+            print("            SKILL VAULT CONFIGURATION")
+            print(f"  Base Directory: {self.base_dir}")
+            print(f"  Config File:    {self.config_file}")
+            print(f"  Mode:           {config_status}")
+            print("==================================================\n")
+            print(f"Protected Core Skills ({len(effective['core_skills'])}):")
+            print(f"  {', '.join(effective['core_skills'])}\n")
+            print(f"Workspace Fingerprint Categories ({len(effective['workspace_fingerprints'])}):")
+            for cat, pats in effective["workspace_fingerprints"].items():
+                print(f"  * {cat}: {len(pats)} pattern(s)")
+            print(f"\nCategory Inference Rules ({len(effective['category_rules'])}):")
+            for cat, kws in effective["category_rules"].items():
+                print(f"  * {cat}: {len(kws)} keyword(s)")
+            print(f"\nRouter SKILL.md Candidates Found: {len(router_cands)}")
+            for rc in router_cands:
+                print(f"  * {rc}")
+            print("")
 
     def verify(self, fix=False):
         """Perform a comprehensive bi-directional integrity check across Disk, Manifest, and INDEX.md."""
@@ -1385,6 +1983,16 @@ def main():
     p_imp.add_argument("--force", action="store_true", help="Overwrite existing skill in project regardless of recency")
     p_imp.add_argument("--dry-run", action="store_true", help="Preview skills that would be imported without copying")
 
+    # Config
+    p_cfg = subparsers.add_parser("config", help="Inspect or customize vault_config.json and sync SKILL.md router prompt")
+    p_cfg.add_argument("--show", action="store_true", help="Show active configuration and defaults")
+    p_cfg.add_argument("--init", action="store_true", dest="init_config", help="Write current configuration defaults to vault_config.json")
+    p_cfg.add_argument("--add-core", nargs="+", metavar="SKILL", help="Add one or more skills to protected core skills")
+    p_cfg.add_argument("--remove-core", nargs="+", metavar="SKILL", help="Remove one or more skills from protected core skills")
+    p_cfg.add_argument("--add-fingerprint", nargs=2, action="append", metavar=("CATEGORY", "PATTERN"), help="Add a workspace file/glob fingerprint for a category")
+    p_cfg.add_argument("--add-category-rule", nargs=2, action="append", metavar=("CATEGORY", "KEYWORD"), help="Add an inference keyword rule for a category")
+    p_cfg.add_argument("--sync-prompt", action="store_true", help="Synchronize SKILL.md router description with archived categories")
+
     args = parser.parse_args()
     mgr = SkillVault(base_dir=args.base_dir)
 
@@ -1442,6 +2050,16 @@ def main():
                 force=args.force,
                 dry_run=args.dry_run,
             )
+        )
+    elif args.command == "config":
+        mgr.manage_config(
+            show=args.show,
+            init_config=args.init_config,
+            add_core=args.add_core,
+            remove_core=args.remove_core,
+            add_fingerprint=args.add_fingerprint,
+            add_category_rule=args.add_category_rule,
+            sync_prompt=args.sync_prompt,
         )
 
 

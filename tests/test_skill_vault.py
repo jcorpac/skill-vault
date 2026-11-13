@@ -610,6 +610,148 @@ class TestSkillVault(unittest.TestCase):
         self.assertEqual(res.returncode, 0, f"CLI stderr: {res.stderr}")
         self.assertIn("SKILL VAULT AUTO-SYNC & INGEST", res.stdout)
 
+    # --- 10. Universal Stack, Config & Dynamic Router Sync Tests ---
+
+    def test_universal_category_inference_across_stacks(self):
+        """Test infer_category across diverse ecosystems and explicit SKILL.md frontmatter category."""
+        self.assertEqual(
+            self.mgr.infer_category("react-nextjs-ui", "Builds accessible frontend components."),
+            "Frontend & Web Development",
+        )
+        self.assertEqual(
+            self.mgr.infer_category("fastapi-microservice", "REST API service with FastAPI."),
+            "Backend & APIs",
+        )
+        self.assertEqual(
+            self.mgr.infer_category("kubernetes-helm-deploy", "Deploys Helm charts to k8s."),
+            "Cloud & DevOps",
+        )
+        self.assertEqual(
+            self.mgr.infer_category("prisma-postgres-orm", "Manages Prisma schema and migrations."),
+            "Databases & Storage",
+        )
+        self.assertEqual(
+            self.mgr.infer_category("flutter-ios-widget", "Cross-platform mobile UI."),
+            "Mobile & Cross-Platform",
+        )
+        self.assertEqual(
+            self.mgr.infer_category("playwright-e2e-runner", "Automated browser tests."),
+            "Testing, QA & Security",
+        )
+        self.assertEqual(
+            self.mgr.infer_category("pytorch-rag-pipeline", "Embeddings and RAG training."),
+            "AI, LLM & Machine Learning",
+        )
+
+        # Explicit category in SKILL.md frontmatter must override keyword heuristics
+        pinned_dir = self.skills_dir / "custom-react-skill"
+        pinned_dir.mkdir(parents=True, exist_ok=True)
+        (pinned_dir / "SKILL.md").write_text(
+            "---\nname: custom-react-skill\ncategory: Design Systems\ndescription: React UI tokens.\n---\n# Custom\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            self.mgr.infer_category("custom-react-skill", "React UI tokens."),
+            "Design Systems",
+        )
+
+    def test_vault_config_customization(self):
+        """Test vault_config.json creation, core skill updates, fingerprints, and custom category rules."""
+        self.mgr.manage_config(init_config=True)
+        self.assertTrue(self.mgr.config_file.exists())
+
+        self.mgr.manage_config(
+            add_core=["my-custom-core"],
+            remove_core=["find-skills"],
+            add_fingerprint=("Custom Blockchain", "*.sol"),
+            add_category_rule=("Custom Payments", "stripe"),
+        )
+
+        core_set = self.mgr.get_core_skills()
+        self.assertIn("my-custom-core", core_set)
+        self.assertNotIn("find-skills", core_set)
+
+        # Custom category rule must take precedence over built-in Backend rule for 'stripe'
+        self.assertEqual(
+            self.mgr.infer_category("stripe-webhook-handler", "Handles Stripe billing events."),
+            "Custom Payments",
+        )
+
+        # Custom workspace fingerprint must be detected and mounted during optimize
+        self._create_mock_skill(self.archive_dir / "skills", "solidity-auditor", "Audits smart contracts.")
+        self.mgr.save_manifest([
+            {
+                "name": "solidity-auditor",
+                "category": "Custom Blockchain",
+                "original_path": "skills/solidity-auditor",
+                "archived_path": "skill_archive/skills/solidity-auditor",
+            }
+        ])
+
+        ws = tempfile.TemporaryDirectory()
+        try:
+            ws_path = Path(ws.name)
+            (ws_path / "Token.sol").write_text("pragma solidity ^0.8.0;", encoding="utf-8")
+            detected = self.mgr.detect_workspace_categories(ws_path)
+            self.assertIn("Custom Blockchain", detected)
+
+            self.mgr.optimize(workspace_path=ws_path)
+            self.assertTrue((self.skills_dir / "solidity-auditor" / "SKILL.md").exists())
+        finally:
+            ws.cleanup()
+
+    def test_frontmatter_core_skill_protection(self):
+        """Test that skills marked with core: true in SKILL.md frontmatter are protected in sync and optimize."""
+        pinned_dir = self.skills_dir / "company-policy-guard"
+        pinned_dir.mkdir(parents=True, exist_ok=True)
+        (pinned_dir / "SKILL.md").write_text(
+            "---\nname: company-policy-guard\ncore: true\ndescription: Enforces org rules.\n---\n# Policy\n",
+            encoding="utf-8",
+        )
+        self._create_mock_skill(self.skills_dir, "disposable-react-skill", "React component helper.")
+
+        # 1. sync() should ingest both, prune disposable, and retain core-pinned skill
+        exit_code = self.mgr.sync()
+        self.assertEqual(exit_code, 0)
+        self.assertTrue((self.skills_dir / "company-policy-guard" / "SKILL.md").exists())
+        self.assertFalse((self.skills_dir / "disposable-react-skill").exists())
+
+        # 2. optimize() on an empty generic workspace must also retain core-pinned skill
+        self._create_mock_skill(self.skills_dir, "another-temp-skill", "Temporary skill.")
+        ws = tempfile.TemporaryDirectory()
+        try:
+            self.mgr.optimize(workspace_path=Path(ws.name))
+            self.assertTrue((self.skills_dir / "company-policy-guard" / "SKILL.md").exists())
+            self.assertFalse((self.skills_dir / "another-temp-skill").exists())
+        finally:
+            ws.cleanup()
+
+    def test_dynamic_router_skill_md_sync(self):
+        """Test that reindex dynamically updates skill-vault SKILL.md frontmatter from archived categories."""
+        router_dir = self.skills_dir / "skill-vault"
+        router_dir.mkdir(parents=True, exist_ok=True)
+        router_md = router_dir / "SKILL.md"
+        router_md.write_text(
+            "---\n"
+            "name: skill-vault\n"
+            "description: >-\n"
+            "  Universal agent-agnostic skill router, lifecycle manager, and tiered storage engine for AI coding agents.\n"
+            "---\n\n"
+            "# Skill Vault\n",
+            encoding="utf-8",
+        )
+
+        self._create_mock_skill(self.skills_dir, "react-ui", "Builds React interfaces.")
+        self._create_mock_skill(self.skills_dir, "k8s-helper", "Manages Kubernetes clusters.")
+        self.mgr.archive(name="react-ui", category="Frontend & Web Development")
+        self.mgr.archive(name="k8s-helper", category="Cloud & DevOps")
+
+        updated_text = router_md.read_text(encoding="utf-8")
+        self.assertIn("2 specialized domain skill(s) in cold storage", updated_text)
+        self.assertIn("(1) Cloud & DevOps (k8s-helper)", updated_text)
+        self.assertIn("(2) Frontend & Web Development (react-ui)", updated_text)
+        self.assertIn("# Skill Vault", updated_text)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1,17 +1,9 @@
 ---
 name: skill-vault
 description: >-
-  Universal agent-agnostic skill router and tiered storage manager for 210+ specialized domain skills in cold storage.
-  ALWAYS use this skill whenever the task involves domains or tools not in active memory, including:
-  (1) AlloyDB (Omni, replication, vector, tuning),
-  (2) Cloud SQL (Postgres, MySQL, backup/DR, performance),
-  (3) BigQuery & Data Warehouse (dbt, Dataform, optimization),
-  (4) GCP & Data Engineering (Airflow/Composer, Spanner, Dataproc, GCS),
-  (5) Gemini API & AI Agents (ADK, Live API, Omni Flash, evals),
-  (6) Science & Biomedicine (AlphaFold, AlphaGenome, Foldseek, ChEMBL, PDB, PyMOL, PubMed, variant analysis),
-  (7) Android Development, or
-  (8) General Utilities.
-  Search or restore skills on demand via 'python scripts/skill_vault.py search "<keyword>"', view 'skill_archive/INDEX.md', or run 'restore <name>'.
+  Universal agent-agnostic skill router, lifecycle manager, and tiered storage engine for AI coding agents.
+  ALWAYS use this skill whenever a task involves specialized domain skills, frameworks, or tools not currently loaded in active context memory (L1), or when managing skill context bloat.
+  Search cold storage (L2) on demand via 'python scripts/skill_vault.py search "<keyword>"', view 'skill_archive/INDEX.md', or dynamically mount skills via 'restore', 'import', or 'optimize'.
 ---
 
 # Skill Vault: Universal Agent Skill Lifecycle & Storage Manager
@@ -137,7 +129,7 @@ python scripts/skill_vault.py optimize
 python scripts/skill_vault.py optimize --dry-run
 
 # Optimize for a specific workspace folder and protect custom skills
-python scripts/skill_vault.py optimize --workspace "C:\Projects\my-repo" --protect my-custom-skill
+python scripts/skill_vault.py optimize --workspace "./my-repo" --protect my-custom-skill
 ```
 
 ### I. Recency & Version Prioritization Protocol
@@ -184,6 +176,32 @@ python scripts/skill_vault.py sync --dry-run
 # Ingest new/updated skills into the vault while keeping all active
 python scripts/skill_vault.py sync --keep-active
 ```
+
+### L. Universal Stack Customization & Dynamic Router Sync (`config`)
+Skill Vault supports cross-ecosystem workspace fingerprinting and auto-categorization out of the box (Frontend, Backend, Cloud/DevOps, Databases, Mobile, AI/ML, Testing/Security, Data Engineering, and Science), and can be customized per user or repository via `skill_archive/vault_config.json` or `SKILL.md` frontmatter tags:
+
+```bash
+# Inspect active core skills, stack fingerprints, and category rules
+python scripts/skill_vault.py config --show
+
+# Initialize skill_archive/vault_config.json with universal defaults
+python scripts/skill_vault.py config --init
+
+# Protect or unprotect specific core foundation skills from auto-archiving/pruning
+python scripts/skill_vault.py config --add-core <skill_name>
+python scripts/skill_vault.py config --remove-core <skill_name>
+
+# Add custom workspace file/glob fingerprints and category keyword rules
+python scripts/skill_vault.py config --add-fingerprint "<Category>" "<pattern>"
+python scripts/skill_vault.py config --add-category-rule "<Category>" "<keyword>"
+
+# Dynamically update SKILL.md's router description with currently indexed categories
+python scripts/skill_vault.py config --sync-prompt
+```
+
+Any individual skill's `SKILL.md` frontmatter can also declare:
+- `core: true` (or `pinned: true` / `always_active: true`) to automatically protect that skill during `sync` and `optimize`.
+- `category: "<Category>"` to pin its vault category without needing `--category` flags.
 
 ---
 
