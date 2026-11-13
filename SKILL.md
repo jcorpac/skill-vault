@@ -1,5 +1,6 @@
 ---
 name: skill-vault
+version: 1.7.0
 description: >-
   Universal agent-agnostic skill router, lifecycle manager, and tiered storage engine for AI coding agents.
   ALWAYS use this skill whenever a task involves specialized domain skills, frameworks, or tools not currently loaded in active context memory (L1), or when managing skill context bloat.
