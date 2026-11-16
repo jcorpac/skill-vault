@@ -1,6 +1,6 @@
 ---
 name: skill-vault
-version: 1.7.0
+version: 1.8.0
 description: >-
   Universal agent-agnostic skill router, lifecycle manager, and tiered storage engine for AI coding agents.
   ALWAYS use this skill whenever a task involves specialized domain skills, frameworks, or tools not currently loaded in active context memory (L1), or when managing skill context bloat.
@@ -203,6 +203,22 @@ python scripts/skill_vault.py config --sync-prompt
 Any individual skill's `SKILL.md` frontmatter can also declare:
 - `core: true` (or `pinned: true` / `always_active: true`) to automatically protect that skill during `sync` and `optimize`.
 - `category: "<Category>"` to pin its vault category without needing `--category` flags.
+
+### M. Clean Uninstallation & Safe Decommissioning (`uninstall` / `eject`)
+To cleanly remove or replace `skill-vault` without losing any archived skills or overwriting newer active L1 versions:
+```bash
+# Preview restoration and cleanup plan without modifying files
+python scripts/skill_vault.py uninstall --dry-run
+
+# Restore all archived skills to L1 (preserving newer L1 versions), verify SKILL.md files, and remove archive + skill-vault
+python scripts/skill_vault.py uninstall
+
+# Keep skill_archive as a backup (relocates it out of skills/skill-vault if nested)
+python scripts/skill_vault.py uninstall --keep-archive
+
+# Restore all skills and clear archive, while keeping the skill-vault folder itself
+python scripts/skill_vault.py uninstall --keep-skill
+```
 
 ---
 

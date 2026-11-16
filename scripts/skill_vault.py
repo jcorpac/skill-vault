@@ -334,7 +334,14 @@ def get_skill_metadata(skill_dir):
 
     latest_mtime = 0.0
     try:
-        files = [f for f in skill_dir.rglob("*") if f.is_file()]
+        files = []
+        if skill_dir.exists():
+            for root, dirs, filenames in os.walk(skill_dir):
+                root_path = Path(root)
+                # Do not bleed mtimes from nested sibling skill folders inside a single_skill_dir
+                dirs[:] = [d for d in dirs if not (root_path / d / "SKILL.md").exists()]
+                for fname in filenames:
+                    files.append(root_path / fname)
         if files:
             latest_mtime = max(f.stat().st_mtime for f in files)
         elif skill_dir.exists():
@@ -619,13 +626,22 @@ class SkillVault:
                 for folder in base.iterdir():
                     if folder.is_dir():
                         skill_md = folder / "SKILL.md"
-                        folders[folder.name] = {
+                        has_md = skill_md.exists()
+                        candidate = {
                             "name": folder.name,
                             "folder": folder,
                             "skill_md": skill_md,
-                            "has_skill_md": skill_md.exists(),
-                            "size": skill_md.stat().st_size if skill_md.exists() else 0,
+                            "has_skill_md": has_md,
+                            "size": skill_md.stat().st_size if has_md else 0,
                         }
+                        existing = folders.get(folder.name)
+                        if existing is None:
+                            folders[folder.name] = candidate
+                        elif has_md and (
+                            not existing["has_skill_md"]
+                            or compare_skill_recency(folder, existing["folder"]) > 0
+                        ):
+                            folders[folder.name] = candidate
         return folders
 
     def load_manifest(self):
@@ -678,11 +694,40 @@ class SkillVault:
                 return target
         return None
 
+    def get_root_dir(self):
+        """Return the top-level environment or workspace root directory.
+
+        When base_dir is an installed skill directory nested inside 'skills/skill-vault',
+        returns the parent of 'skills' (e.g. ~/.gemini/config or workspace root).
+        """
+        if self.base_dir.name == "skill-vault" and self.base_dir.parent.name == "skills":
+            return self.base_dir.parent.parent
+        return self.base_dir
+
+    def get_skill_vault_dir(self):
+        """Locate the installed skill-vault skill directory if present (excluding git repo roots)."""
+        if self.base_dir.name == "skill-vault" and self.base_dir.parent.name == "skills":
+            if not (self.base_dir / ".git").exists():
+                return self.base_dir
+        root_dir = self.get_root_dir()
+        for rel in ["skills/skill-vault", ".agents/skills/skill-vault", ".claude/skills/skill-vault"]:
+            cand = (root_dir / rel).resolve()
+            if cand.exists() and not (cand / ".git").exists():
+                return cand
+        return None
+
     def make_portable_path(self, abs_path):
-        """Convert path to relative from base_dir if possible."""
+        """Convert path to relative from base_dir or root_dir if possible."""
+        resolved = Path(abs_path).resolve()
         try:
-            return str(Path(abs_path).resolve().relative_to(self.base_dir))
+            return str(resolved.relative_to(self.base_dir))
         except ValueError:
+            root_dir = self.get_root_dir()
+            if root_dir != self.base_dir:
+                try:
+                    return str(resolved.relative_to(root_dir))
+                except ValueError:
+                    pass
             return str(abs_path)
 
     def resolve_portable_path(self, path_str):
@@ -690,7 +735,69 @@ class SkillVault:
         p = Path(path_str)
         if p.is_absolute():
             return p
-        return (self.base_dir / p).resolve()
+        cand = (self.base_dir / p).resolve()
+        if not cand.exists():
+            root_dir = self.get_root_dir()
+            if root_dir != self.base_dir:
+                root_cand = (root_dir / p).resolve()
+                if root_cand.exists():
+                    return root_cand
+        return cand
+
+    def resolve_original_path(self, path_str, skill_name=None):
+        """Resolve a stored original_path to an active L1 Path outside skills/skill-vault."""
+        root_dir = self.get_root_dir()
+        sv_dir = self.get_skill_vault_dir()
+        if not path_str:
+            skills_root = root_dir / "skills" if root_dir != self.base_dir else self.skills_dir
+            return (skills_root / (skill_name or "unknown-skill")).resolve()
+
+        p = Path(path_str)
+        if p.is_absolute():
+            resolved = p.resolve()
+            if sv_dir and (sv_dir in resolved.parents or resolved == sv_dir):
+                try:
+                    rel = resolved.relative_to(sv_dir)
+                    return (root_dir / rel).resolve()
+                except ValueError:
+                    pass
+            return resolved
+
+        return (root_dir / p).resolve()
+
+    def _copy_skill_safely(self, src_dir, dst_dir):
+        """Copy a skill folder from src_dir to dst_dir without deleting nested sibling skills."""
+        src_dir = Path(src_dir).resolve()
+        dst_dir = Path(dst_dir).resolve()
+        dst_dir.parent.mkdir(parents=True, exist_ok=True)
+
+        def _ignore_nested_skills(curr_dir, names):
+            curr_path = Path(curr_dir).resolve()
+            if curr_path == src_dir:
+                return [
+                    n for n in names
+                    if (curr_path / n).is_dir() and (curr_path / n / "SKILL.md").exists()
+                ]
+            return []
+
+        if dst_dir.exists():
+            nested_skill_dirs = {
+                sub.name for sub in dst_dir.iterdir()
+                if sub.is_dir() and (sub / "SKILL.md").exists()
+            }
+            if nested_skill_dirs or dst_dir.name == "skills":
+                for item in list(dst_dir.iterdir()):
+                    if item.name in nested_skill_dirs:
+                        continue
+                    if item.is_dir():
+                        shutil.rmtree(item)
+                    else:
+                        item.unlink()
+                shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True, ignore=_ignore_nested_skills)
+                return
+            shutil.rmtree(dst_dir)
+
+        shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True, ignore=_ignore_nested_skills)
 
     def parse_index_file(self):
         """Parse INDEX.md and return extracted skills with categories and link targets."""
@@ -1036,6 +1143,8 @@ class SkillVault:
             if data.get("single_skill_dir"):
                 for sub in active_path.iterdir():
                     if sub.is_dir():
+                        if (sub / "SKILL.md").exists():
+                            continue
                         shutil.rmtree(sub)
                     else:
                         sub.unlink()
@@ -1250,30 +1359,207 @@ class SkillVault:
             print("No matching skills found to restore.")
             return
 
-        for item in targets:
-            archived_path = self.resolve_portable_path(item["archived_path"])
-            original_path = self.resolve_portable_path(item["original_path"])
+        disk_skills = self.get_archived_skill_folders()
 
-            if not archived_path.exists():
+        for item in targets:
+            skill_name = item["name"]
+            archived_path = self.resolve_portable_path(item.get("archived_path", ""))
+            disk_cand = disk_skills.get(skill_name)
+            if disk_cand and disk_cand["has_skill_md"]:
+                if not (archived_path / "SKILL.md").exists() or compare_skill_recency(disk_cand["folder"], archived_path) > 0:
+                    archived_path = disk_cand["folder"]
+
+            original_path = self.resolve_original_path(item.get("original_path", ""), skill_name=skill_name)
+
+            if not (archived_path / "SKILL.md").exists():
                 print(f"[Error] Missing archive source: {archived_path}")
                 continue
 
-            original_path.parent.mkdir(parents=True, exist_ok=True)
-            if original_path.exists():
+            if (original_path / "SKILL.md").exists():
                 recency = compare_skill_recency(archived_path, original_path)
                 if recency > 0 or force:
-                    shutil.rmtree(original_path)
-                    shutil.copytree(archived_path, original_path)
-                    print(f"[Restored] Updated L1 with newer L2 version: {item['name']} -> {original_path}")
+                    self._copy_skill_safely(archived_path, original_path)
+                    print(f"[Restored] Updated L1 with newer L2 version: {skill_name} -> {original_path}")
                     continue
                 else:
-                    print(f"[Skip] Target L1 skill '{item['name']}' is already newer than or equal to L2 archive (use --force to overwrite)")
+                    print(f"[Skip] Target L1 skill '{skill_name}' is already newer than or equal to L2 archive (use --force to overwrite)")
                     continue
 
-            shutil.copytree(archived_path, original_path)
-            print(f"[Restored] {item['name']} -> {original_path}")
+            self._copy_skill_safely(archived_path, original_path)
+            print(f"[Restored] {skill_name} -> {original_path}")
 
         print("Restoration complete.")
+
+    def uninstall(self, dry_run=False, force=False, keep_archive=False, keep_skill=False):
+        """Cleanly restore all archived skills to L1 without overwriting newer L1 versions and remove skill-vault."""
+        root_dir = self.get_root_dir()
+        sv_dir = self.get_skill_vault_dir()
+        manifest = self.load_manifest()
+        manifest_map = {item["name"]: item for item in manifest if "name" in item}
+        disk_skills = self.get_archived_skill_folders()
+
+        candidates = []
+        manifested_arch_paths = set()
+        for item in manifest:
+            skill_name = item["name"]
+            archived_path = self.resolve_portable_path(item.get("archived_path", ""))
+            disk_cand = disk_skills.get(skill_name)
+            if disk_cand and disk_cand["has_skill_md"]:
+                if not (archived_path / "SKILL.md").exists() or compare_skill_recency(disk_cand["folder"], archived_path) > 0:
+                    archived_path = disk_cand["folder"]
+            if archived_path.exists():
+                manifested_arch_paths.add(archived_path.resolve())
+            original_path = self.resolve_original_path(item.get("original_path", ""), skill_name=skill_name)
+            candidates.append((skill_name, archived_path, original_path, False))
+
+        # Rescue any unmanifested skills physically sitting in the archive
+        for folder_name, data in sorted(disk_skills.items()):
+            if folder_name in manifest_map or not data["has_skill_md"]:
+                continue
+            if data["folder"].resolve() in manifested_arch_paths:
+                continue
+            original_path = self.resolve_original_path(f"skills/{folder_name}", skill_name=folder_name)
+            candidates.append((folder_name, data["folder"], original_path, True))
+
+        to_restore = []
+        to_upgrade = []
+        to_preserve = []
+        missing_sources = []
+
+        for skill_name, archived_path, original_path, unmanifested in candidates:
+            has_archived = (archived_path / "SKILL.md").exists()
+            has_active = (original_path / "SKILL.md").exists()
+
+            if not has_archived:
+                if has_active:
+                    to_preserve.append((skill_name, archived_path, original_path, "Active L1 present; archive source missing"))
+                else:
+                    missing_sources.append((skill_name, archived_path, original_path))
+                continue
+
+            if has_active:
+                recency = compare_skill_recency(archived_path, original_path)
+                if recency > 0 or force:
+                    reason = "Forced overwrite" if (force and recency <= 0) else "Newer L2 archive version"
+                    to_upgrade.append((skill_name, archived_path, original_path, reason))
+                else:
+                    to_preserve.append((skill_name, archived_path, original_path, "L1 version is newer or equal"))
+            else:
+                reason = "Unmanifested archive folder rescued" if unmanifested else "Missing from active L1"
+                to_restore.append((skill_name, archived_path, original_path, reason))
+
+        print("==================================================")
+        print("       SKILL VAULT CLEAN UNINSTALL / DECOMMISSION")
+        print(f"  Base Directory: {self.base_dir}")
+        print(f"  Root Directory: {root_dir}")
+        print(f"  Archive Store:  {self.archive_dir}")
+        print(f"  Skill Folder:   {sv_dir if sv_dir else '(None detected)'}")
+        print("==================================================\n")
+
+        print(f"Restoration Plan ({len(candidates)} total archived/discovered skill(s)):")
+        print(f"  * Restore to active L1:                {len(to_restore)}")
+        for name, _, dst, reason in to_restore:
+            print(f"    [RESTORE]  {name} -> {dst} ({reason})")
+
+        print(f"  * Upgrade active L1 (newer in L2):     {len(to_upgrade)}")
+        for name, _, dst, reason in to_upgrade:
+            print(f"    [UPGRADE]  {name} -> {dst} ({reason})")
+
+        print(f"  * Preserve active L1 (newer/equal):    {len(to_preserve)}")
+        for name, _, dst, reason in to_preserve:
+            print(f"    [PRESERVE] {name} -> {dst} ({reason})")
+
+        if missing_sources:
+            print(f"  * Missing archive sources:             {len(missing_sources)}")
+            for name, src, _ in missing_sources:
+                print(f"    [ERROR]    {name} (missing {src})")
+
+        print("\nCleanup Plan:")
+        if keep_archive:
+            if sv_dir and not keep_skill and self.archive_dir.exists() and (sv_dir in self.archive_dir.parents):
+                print(f"  * Archive:  Relocate {self.archive_dir} -> {root_dir / 'skill_archive'}")
+            else:
+                print(f"  * Archive:  Keep {self.archive_dir}")
+        else:
+            print(f"  * Archive:  Remove {self.archive_dir}")
+
+        if keep_skill or not sv_dir:
+            print(f"  * Skill:    Keep {sv_dir if sv_dir else '(None detected)'}")
+        else:
+            print(f"  * Skill:    Remove {sv_dir}")
+        print("")
+
+        if missing_sources:
+            print("[Abort] One or more archive sources are missing. Nothing was modified or deleted.")
+            return 1
+
+        if dry_run:
+            print("[Dry Run] Uninstall preview complete. No files were modified or removed.")
+            return 0
+
+        for name, src, dst, _ in to_restore:
+            self._copy_skill_safely(src, dst)
+            print(f"[Restored] {name} -> {dst}")
+
+        for name, src, dst, _ in to_upgrade:
+            self._copy_skill_safely(src, dst)
+            print(f"[Upgraded] {name} -> {dst}")
+
+        # Verification gate before deleting archive or skill-vault folder
+        dirs_to_delete = []
+        if not keep_archive and self.archive_dir.exists():
+            dirs_to_delete.append(self.archive_dir.resolve())
+        if sv_dir and not keep_skill and sv_dir.exists():
+            dirs_to_delete.append(sv_dir.resolve())
+
+        verification_errors = []
+        for skill_name, _, original_path, _ in to_restore + to_upgrade + to_preserve:
+            orig_resolved = Path(original_path).resolve()
+            skill_md = orig_resolved / "SKILL.md"
+            if not skill_md.exists() or skill_md.stat().st_size == 0:
+                verification_errors.append(f"Missing or empty SKILL.md for '{skill_name}' at {skill_md}")
+                continue
+            for del_dir in dirs_to_delete:
+                if orig_resolved == del_dir or del_dir in orig_resolved.parents:
+                    verification_errors.append(
+                        f"Destination '{orig_resolved}' for '{skill_name}' is inside '{del_dir}' which is scheduled for deletion"
+                    )
+
+        if verification_errors:
+            print("\n[Abort] Verification failed. Preserving archive and skill-vault to prevent data loss:")
+            for err in verification_errors:
+                print(f"  [X] {err}")
+            return 1
+
+        # Relocate or delete archive
+        if keep_archive:
+            if sv_dir and not keep_skill and self.archive_dir.exists() and (sv_dir in self.archive_dir.parents):
+                relocated = (root_dir / "skill_archive").resolve()
+                if self.archive_dir.resolve() != relocated:
+                    shutil.copytree(self.archive_dir, relocated, dirs_exist_ok=True)
+                    cwd_resolved = Path.cwd().resolve()
+                    if cwd_resolved == self.archive_dir.resolve() or self.archive_dir.resolve() in cwd_resolved.parents:
+                        os.chdir(root_dir)
+                    shutil.rmtree(self.archive_dir)
+                    print(f"[Relocated] Archive preserved at: {relocated}")
+        else:
+            if self.archive_dir.exists():
+                cwd_resolved = Path.cwd().resolve()
+                if cwd_resolved == self.archive_dir.resolve() or self.archive_dir.resolve() in cwd_resolved.parents:
+                    os.chdir(root_dir)
+                shutil.rmtree(self.archive_dir)
+                print(f"[Removed] Archive directory: {self.archive_dir}")
+
+        if sv_dir and not keep_skill and sv_dir.exists():
+            cwd_resolved = Path.cwd().resolve()
+            if cwd_resolved == sv_dir.resolve() or sv_dir.resolve() in cwd_resolved.parents:
+                os.chdir(root_dir)
+            shutil.rmtree(sv_dir)
+            print(f"[Removed] Skill-vault directory: {sv_dir}")
+
+        total_safe = len(to_restore) + len(to_upgrade) + len(to_preserve)
+        print(f"\n[OK] Clean uninstall complete! {total_safe} skill(s) verified safe in active L1 locations.")
+        return 0
 
     def reindex(self):
         """Rebuild INDEX.md grouped by manifest categories with portable relative links."""
@@ -1993,6 +2279,17 @@ def main():
     p_cfg.add_argument("--add-category-rule", nargs=2, action="append", metavar=("CATEGORY", "KEYWORD"), help="Add an inference keyword rule for a category")
     p_cfg.add_argument("--sync-prompt", action="store_true", help="Synchronize SKILL.md router description with archived categories")
 
+    # Uninstall / Eject
+    p_uninst = subparsers.add_parser(
+        "uninstall",
+        aliases=["eject"],
+        help="Cleanly restore all archived skills to L1 (preserving newer L1 versions) and remove skill-vault",
+    )
+    p_uninst.add_argument("--dry-run", action="store_true", help="Preview restoration and removal plan without modifying files")
+    p_uninst.add_argument("--force", action="store_true", help="Overwrite active L1 skills even if L1 copy is newer")
+    p_uninst.add_argument("--keep-archive", action="store_true", help="Preserve skill_archive (relocating it out of skill-vault if nested)")
+    p_uninst.add_argument("--keep-skill", action="store_true", help="Restore all skills and remove archive, but keep the skill-vault skill folder")
+
     args = parser.parse_args()
     mgr = SkillVault(base_dir=args.base_dir)
 
@@ -2060,6 +2357,15 @@ def main():
             add_fingerprint=args.add_fingerprint,
             add_category_rule=args.add_category_rule,
             sync_prompt=args.sync_prompt,
+        )
+    elif args.command in ("uninstall", "eject"):
+        sys.exit(
+            mgr.uninstall(
+                dry_run=args.dry_run,
+                force=args.force,
+                keep_archive=args.keep_archive,
+                keep_skill=args.keep_skill,
+            )
         )
 
 

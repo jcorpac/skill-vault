@@ -752,6 +752,178 @@ class TestSkillVault(unittest.TestCase):
         self.assertIn("(2) Frontend & Web Development (react-ui)", updated_text)
         self.assertIn("# Skill Vault", updated_text)
 
+    # --- 11. Clean Uninstall & Safe Decommissioning Tests ---
+
+    def test_uninstall_restores_all_and_preserves_newer_l1(self):
+        """Test uninstall restores L2 skills, upgrades older L1, preserves newer L1, rescues unindexed folders, and cleans up."""
+        self._create_mock_skill(self.skills_dir, "skill-vault", "Vault router.")
+
+        # 1. Archived-only skill (only in L2)
+        self._create_mock_skill(self.archive_dir / "skills", "skill-only-l2", "Only in archive.", version="1.0.0")
+        # 2. L2 is newer than L1 (v2 in L2 vs v1 in L1)
+        self._create_mock_skill(self.skills_dir, "upgradeable-skill", "Old L1.", version="v1")
+        self._create_mock_skill(self.archive_dir / "skills", "upgradeable-skill", "New L2.", version="v2")
+        # 3. L1 is newer than L2 (v3 in L1 vs v1 in L2) -> MUST NOT be overwritten
+        self._create_mock_skill(self.skills_dir, "newer-l1-skill", "Fresh L1.", version="v3")
+        self._create_mock_skill(self.archive_dir / "skills", "newer-l1-skill", "Stale L2.", version="v1")
+        # 4. Unmanifested skill folder physically present in archive
+        self._create_mock_skill(self.archive_dir / "skills", "unindexed-gem", "Unindexed gem.", version="1.0")
+
+        manifest = [
+            {
+                "name": "skill-only-l2",
+                "category": "General",
+                "original_path": "skills/skill-only-l2",
+                "archived_path": "skill_archive/skills/skill-only-l2",
+            },
+            {
+                "name": "upgradeable-skill",
+                "category": "General",
+                "original_path": "skills/upgradeable-skill",
+                "archived_path": "skill_archive/skills/upgradeable-skill",
+            },
+            {
+                "name": "newer-l1-skill",
+                "category": "General",
+                "original_path": "skills/newer-l1-skill",
+                "archived_path": "skill_archive/skills/newer-l1-skill",
+            },
+        ]
+        self.mgr.save_manifest(manifest)
+
+        exit_code = self.mgr.uninstall()
+        self.assertEqual(exit_code, 0)
+
+        # Verify restored, upgraded, preserved, and rescued skills
+        self.assertTrue((self.skills_dir / "skill-only-l2" / "SKILL.md").exists())
+        self.assertIn("version: v2", (self.skills_dir / "upgradeable-skill" / "SKILL.md").read_text(encoding="utf-8"))
+        self.assertIn("version: v3", (self.skills_dir / "newer-l1-skill" / "SKILL.md").read_text(encoding="utf-8"))
+        self.assertTrue((self.skills_dir / "unindexed-gem" / "SKILL.md").exists())
+
+        # Verify archive and skill-vault skill directory were cleanly removed
+        self.assertFalse(self.archive_dir.exists())
+        self.assertFalse((self.skills_dir / "skill-vault").exists())
+
+    def test_uninstall_nested_skill_vault_and_single_skill_plugin_dirs(self):
+        """Test uninstall when skill_archive is nested inside skills/skill-vault with single-skill plugin roots."""
+        nested_sandbox = tempfile.TemporaryDirectory()
+        try:
+            root_dir = Path(nested_sandbox.name).resolve()
+            sv_dir = root_dir / "skills" / "skill-vault"
+            arch_dir = sv_dir / "skill_archive"
+            self._create_mock_skill(root_dir / "skills", "skill-vault", "Nested vault.")
+
+            # Create archived skills inside nested skill_archive
+            self._create_mock_skill(
+                arch_dir / "plugins_android_skills",
+                "android-cli",
+                "Android CLI.",
+                extra_files={"references/interact.md": "# Interact"},
+            )
+            self._create_mock_skill(arch_dir / "skills", "compose-preview", "Compose preview.")
+            self._create_mock_skill(arch_dir / "skills", "global-tool", "Global tool.")
+
+            # Pre-create an empty plugins/android-cli-plugin/skills directory (simulating installed plugin)
+            empty_plugin_skills = root_dir / "plugins" / "android-cli-plugin" / "skills"
+            empty_plugin_skills.mkdir(parents=True, exist_ok=True)
+
+            nested_mgr = SkillVault(base_dir=str(sv_dir))
+            nested_mgr.save_manifest([
+                {
+                    "name": "android-cli",
+                    "category": "Android Development",
+                    "original_path": "plugins/android-cli-plugin/skills",
+                    "archived_path": "skill_archive/plugins_android_skills/android-cli",
+                },
+                {
+                    "name": "compose-preview",
+                    "category": "Android Development",
+                    "original_path": "plugins/android-cli-plugin/skills/compose-preview",
+                    "archived_path": "skill_archive/skills/compose-preview",
+                },
+                {
+                    "name": "global-tool",
+                    "category": "General",
+                    "original_path": "skills/global-tool",
+                    "archived_path": "skill_archive/skills/global-tool",
+                },
+            ])
+
+            exit_code = nested_mgr.uninstall()
+            self.assertEqual(exit_code, 0)
+
+            # Verify all skills restored outside skills/skill-vault without clobbering siblings
+            self.assertIn("name: android-cli", (empty_plugin_skills / "SKILL.md").read_text(encoding="utf-8"))
+            self.assertTrue((empty_plugin_skills / "references" / "interact.md").exists())
+            self.assertIn("name: compose-preview", (empty_plugin_skills / "compose-preview" / "SKILL.md").read_text(encoding="utf-8"))
+            self.assertIn("name: global-tool", (root_dir / "skills" / "global-tool" / "SKILL.md").read_text(encoding="utf-8"))
+
+            # Nested skill-vault folder (and its nested archive) must be removed
+            self.assertFalse(sv_dir.exists())
+        finally:
+            nested_sandbox.cleanup()
+
+    def test_uninstall_dry_run_and_keep_archive(self):
+        """Test uninstall --dry-run leaves everything untouched and --keep-archive relocates nested archives."""
+        nested_sandbox = tempfile.TemporaryDirectory()
+        try:
+            root_dir = Path(nested_sandbox.name).resolve()
+            sv_dir = root_dir / "skills" / "skill-vault"
+            arch_dir = sv_dir / "skill_archive"
+            self._create_mock_skill(root_dir / "skills", "skill-vault", "Nested vault.")
+            self._create_mock_skill(arch_dir / "skills", "preserved-tool", "Preserved tool.")
+
+            nested_mgr = SkillVault(base_dir=str(sv_dir))
+            nested_mgr.save_manifest([
+                {
+                    "name": "preserved-tool",
+                    "category": "General",
+                    "original_path": "skills/preserved-tool",
+                    "archived_path": "skill_archive/skills/preserved-tool",
+                }
+            ])
+
+            # 1. Dry run must not restore or delete anything
+            dry_rc = nested_mgr.uninstall(dry_run=True)
+            self.assertEqual(dry_rc, 0)
+            self.assertFalse((root_dir / "skills" / "preserved-tool").exists())
+            self.assertTrue(sv_dir.exists())
+            self.assertTrue(arch_dir.exists())
+
+            # 2. Keep archive must restore L1, relocate archive to root_dir/skill_archive, and remove skill-vault
+            keep_rc = nested_mgr.uninstall(keep_archive=True)
+            self.assertEqual(keep_rc, 0)
+            self.assertTrue((root_dir / "skills" / "preserved-tool" / "SKILL.md").exists())
+            self.assertFalse(sv_dir.exists())
+            self.assertTrue((root_dir / "skill_archive" / "skills" / "preserved-tool" / "SKILL.md").exists())
+        finally:
+            nested_sandbox.cleanup()
+
+    def test_uninstall_cli(self):
+        """Test uninstall command execution via subprocess CLI."""
+        self._create_mock_skill(self.skills_dir, "skill-vault", "CLI Vault.")
+        self._create_mock_skill(self.archive_dir / "skills", "cli-eject-skill", "CLI eject skill.")
+        self.mgr.save_manifest([
+            {
+                "name": "cli-eject-skill",
+                "category": "CLI",
+                "original_path": "skills/cli-eject-skill",
+                "archived_path": "skill_archive/skills/cli-eject-skill",
+            }
+        ])
+
+        script_path = SCRIPT_DIR / "skill_vault.py"
+        res = subprocess.run(
+            [sys.executable, str(script_path), "--base-dir", str(self.base_dir), "uninstall"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res.returncode, 0, f"CLI stderr: {res.stderr}")
+        self.assertIn("[OK] Clean uninstall complete!", res.stdout)
+        self.assertTrue((self.skills_dir / "cli-eject-skill" / "SKILL.md").exists())
+        self.assertFalse(self.archive_dir.exists())
+        self.assertFalse((self.skills_dir / "skill-vault").exists())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

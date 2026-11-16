@@ -112,6 +112,9 @@ python scripts/skill_vault.py verify
 | `skill-vault config --sync-prompt` | Dynamically update `SKILL.md`'s router description with your vault's categories. |
 | `skill-vault verify` | Audit bi-directional consistency across disk, manifest, and index. |
 | `skill-vault verify --fix` | Audit and automatically self-heal all detected discrepancies. |
+| `skill-vault uninstall` | Cleanly restore all archived skills to L1 (preserving newer L1 versions), verify, and remove archive + `skill-vault` (alias: `eject`). |
+| `skill-vault uninstall --dry-run` | Preview the uninstall restoration and cleanup plan without modifying files. |
+| `skill-vault uninstall --keep-archive` | Restore all skills to L1 and remove `skill-vault`, while preserving/relocating `skill_archive`. |
 
 ---
 
