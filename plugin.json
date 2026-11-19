@@ -1,0 +1,10 @@
+{
+  "name": "skill-vault",
+  "displayName": "Skill Vault",
+  "version": "2.0.0",
+  "description": "Automatic background skill router, cold-storage archive, and read-only JIT MCP server for AI coding agents.",
+  "author": "jcorpac",
+  "homepage": "https://github.com/jcorpac/skill-vault#readme",
+  "repository": "https://github.com/jcorpac/skill-vault",
+  "license": "MIT"
+}

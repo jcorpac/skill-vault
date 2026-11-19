@@ -1,240 +1,60 @@
 ---
 name: skill-vault
-version: 1.8.0
+version: 2.0.0
 description: >-
-  Universal agent-agnostic skill router, lifecycle manager, and tiered storage engine for AI coding agents.
-  ALWAYS use this skill whenever a task involves specialized domain skills, frameworks, or tools not currently loaded in active context memory (L1), or when managing skill context bloat.
-  Search cold storage (L2) on demand via 'python scripts/skill_vault.py search "<keyword>"', view 'skill_archive/INDEX.md', or dynamically mount skills via 'restore', 'import', or 'optimize'.
+  Universal agent-agnostic skill router and tiered storage manager.
+  Background hooks automatically inject relevant vaulted skills on demand;
+  use MCP tools search_skills/load_skill for mid-turn lookups.
 ---
 
-# Skill Vault: Universal Agent Skill Lifecycle & Storage Manager
+# Skill Vault: Automatic Skill Router & Cold-Storage Manager
 
-## Overview
-**Skill Vault** provides an **agent-agnostic**, **environment-agnostic**, and **OS-agnostic** framework for:
-1. **Tiered Context Optimization**: Managing active skills (L1 context memory) and cold-storage archives (L2 disk storage) to eliminate "skill bleed" and prompt token waste.
-2. **Dynamic Skill Routing**: Discovering, querying, and dynamically executing specialized domain skills across active and archived repositories.
-3. **Decoupled Categorization**: Organizing skills via manifest metadata without modifying `SKILL.md` files.
-4. **Bi-Directional Integrity Auditing**: Verifying and self-healing consistency across disk folders, `backup_manifest.json`, and `INDEX.md`.
+**Skill Vault** keeps active L1 context minimal (core skills only) while preserving instant, zero-approval access to all vaulted L2 domain skills:
 
----
-
-## 1. Skill Discovery & Execution Protocol (Agent-Agnostic)
-
-Whenever a user request requires specialized domain knowledge:
-
-1. **Locate Target Skill**:
-   - Check active skill locations (`skills/`, `.agents/skills/`, `.claude/skills/`, `plugins/*/skills/`).
-   - If missing from active locations, search the central archive manifest via CLI:
-     ```bash
-     python scripts/skill_vault.py search "<keyword or topic>"
-     ```
-     or consult `skill_archive/INDEX.md` / `skill_archive/backup_manifest.json`.
-
-2. **Execute Based on Environment Capabilities**:
-   - **Multi-Agent / Delegation Supported** (e.g., Antigravity `invoke_subagent`, Claude Code subagent):
-     Spawn a subagent instructed to view the target `SKILL.md` and execute the task.
-   - **Single-Agent CLI / Standalone Mode**:
-     Use native file-reading tools to load the target `SKILL.md` directly into main context.
+1. **Background Lifecycle Hooks (Primary Path)**:
+   - `SessionStart` incrementally syncs newly installed/updated plugin skills, refreshes `search_index.json`, and warms workspace stack fingerprints.
+   - `PreInvocation` / `UserPromptSubmit` / `BeforeAgent` scores the user prompt via a pre-built BM25 + multi-signal index (`<100ms`), injects top high-confidence skills or compact pointers directly from L2, and injects **0 tokens** on unrelated turns.
+2. **Read-Only MCP Fallback (Mid-Turn Discovery)**:
+   - If a task pivots mid-turn to a specialized domain not present in context, call the `skill-vault` MCP tools:
+     - `search_skills(query, category?, limit?)` — Search vaulted L2 skills by keyword, intent, or list categories.
+     - `load_skill(name, file?)` — Read a vaulted skill's `SKILL.md` or any companion file (`references/`, `scripts/`, `examples/`).
+   - Never mutate L1 active directories or run shell commands solely to browse archived skills when MCP tools are available.
 
 ---
 
-## 2. Skill Lifecycle Management Operations (Automated via CLI)
-
-All lifecycle operations are executed via the portable Python CLI `scripts/skill_vault.py`.
-
-> [!NOTE]
-> `SKILL.md` files are **never modified** when categorizing or archiving. Categories are strictly routing metadata stored inside `backup_manifest.json` and presented in `INDEX.md`.
-
-### A. Archiving Skills (LLM-Driven Categorization)
-When asked to archive an active skill into cold storage:
-1. Read the skill's `SKILL.md` to understand its domain.
-2. Select a concise, human-readable category fitting the user's workspace (e.g. `"Cloud Infrastructure"`, `"Data Engineering"`, `"Mobile Development"`, `"Bioinformatics"`).
-3. Run the archive command with `--category`:
-```bash
-# Archive a single skill with category
-python scripts/skill_vault.py archive <skill_name> --category "<Category Name>"
-
-# Archive multiple skills matching a pattern
-python scripts/skill_vault.py archive --pattern "gcp-*" --category "GCP & Data Engineering"
-
-# Archive while keeping the active folder intact
-python scripts/skill_vault.py archive <skill_name> --category "<Category Name>" --keep-active
-```
-
-### B. Recategorizing Skills
-To reorganize existing archived skills without touching `SKILL.md`:
-```bash
-python scripts/skill_vault.py recategorize <skill_name> "<New Category Name>"
-```
-
-### C. Unarchiving / Restoring Skills
-To restore archived skills back to active availability:
-```bash
-# Restore a specific skill
-python scripts/skill_vault.py restore <skill_name>
-
-# Restore all skills in a category
-python scripts/skill_vault.py restore --category "GCP & Data Engineering"
-
-# Restore all archived skills
-python scripts/skill_vault.py restore --all
-```
-
-### D. Reindexing & Manifest Refresh
-To rebuild `INDEX.md` and ensure all paths and category sections are synchronized:
-```bash
-python scripts/skill_vault.py reindex
-```
-
-### E. Presenting Skills & Tier Status
-To get a rapid overview of what skills are currently in active context memory (L1) vs. cold storage (L2):
-```bash
-# Full overview of active and archived skills
-python scripts/skill_vault.py list
-
-# Quick breakdown of counts and categories
-python scripts/skill_vault.py status
-
-# List only active skills in context
-python scripts/skill_vault.py list --active
-
-# List archived skills in a specific category
-python scripts/skill_vault.py list --archived --category "Cloud SQL"
-
-# Output structured JSON (for scripts/dashboards)
-python scripts/skill_vault.py list --json
-```
-
-### F. Skill Discovery & Keyword Search
-```bash
-python scripts/skill_vault.py search "<keyword>"
-```
-
-### G. Archive Integrity Audit & Self-Healing
-To confirm bi-directional consistency across disk folders, `backup_manifest.json`, and `INDEX.md`:
-```bash
-# Run integrity verification audit
-python scripts/skill_vault.py verify
-
-# Run audit and automatically fix any detected discrepancies
-python scripts/skill_vault.py verify --fix
-```
-
-### H. Automated Context Optimization (Zero-Effort Pruning & Mounting)
-To automatically keep only the minimum necessary skills active in context memory (L1) based on workspace fingerprints, while parking unneeded skills in cold storage (L2):
-```bash
-# Automatically optimize active skills for the current workspace
-python scripts/skill_vault.py optimize
-
-# Preview what would be archived and mounted without moving files
-python scripts/skill_vault.py optimize --dry-run
-
-# Optimize for a specific workspace folder and protect custom skills
-python scripts/skill_vault.py optimize --workspace "./my-repo" --protect my-custom-skill
-```
-
-### I. Recency & Version Prioritization Protocol
-Skill Vault automatically protects newer skills and prevents regressions when archiving, restoring, or optimizing:
-1. **Semantic Version Check**: Compares `version:` headers in `SKILL.md` frontmatter (e.g., `v2` > `v1`, `1.2.0` > `1.1.0`).
-2. **Timestamp Recency Fallback**: If versions match or are unversioned, compares the newest file modification timestamp (`mtime`).
-3. **Tier Behavior**:
-   - **`archive`**: When L1 is newer or equal to L2, updates L2 with the active version. If L2 is strictly newer, preserves L2 to avoid overwriting with stale files.
-   - **`restore`**: When L2 is strictly newer than L1, upgrades active L1 with the newer vault copy. If L1 is newer or equal, preserves L1.
-   - **`optimize`**: Automatically detects and upgrades active L1 skills if newer versions exist in the vault, while archiving unneeded skills safely.
-   - **`--force`**: Bypasses recency checks on `archive`, `restore`, or `optimize` when an intentional overwrite is required.
-
-### J. Project-Level Skill Importing
-To import skills from a global vault (e.g., `~/.gemini/config/skill_archive` or `$SKILL_VAULT_BASE`) into a project workspace on demand:
-```bash
-# Import a specific skill into the current project (defaults to ./skills or ./.agents/skills)
-python scripts/skill_vault.py import <skill_name>
-
-# Import all skills in a category into the current project
-python scripts/skill_vault.py import --category "BigQuery & Data Warehouse"
-
-# Import matching skills via glob pattern
-python scripts/skill_vault.py import --pattern "gcp-*"
-
-# Import into an explicit project destination
-python scripts/skill_vault.py import <skill_name> --dest "./.agents/skills"
-
-# Preview what would be imported without copying
-python scripts/skill_vault.py import <skill_name> --dry-run
-
-# Force overwrite of project skill if already present
-python scripts/skill_vault.py import <skill_name> --force
-```
-
-### K. Automated Plugin Ingestion & Syncing (`sync`)
-Whenever plugins are installed or updated, use `sync` to scan all active locations and plugins, ingest new/updated skills into the vault, protect the Core Foundation Skills, and prune non-core skills:
-```bash
-# Scan plugins and active skills, ingest new/updated skills, and prune non-core active skills
-python scripts/skill_vault.py sync
-
-# Preview what would be ingested and pruned without moving or deleting files
-python scripts/skill_vault.py sync --dry-run
-
-# Ingest new/updated skills into the vault while keeping all active
-python scripts/skill_vault.py sync --keep-active
-```
-
-### L. Universal Stack Customization & Dynamic Router Sync (`config`)
-Skill Vault supports cross-ecosystem workspace fingerprinting and auto-categorization out of the box (Frontend, Backend, Cloud/DevOps, Databases, Mobile, AI/ML, Testing/Security, Data Engineering, and Science), and can be customized per user or repository via `skill_archive/vault_config.json` or `SKILL.md` frontmatter tags:
+## CLI Operations (`skill-vault` / `npx @jcorpac/skill-vault`)
 
 ```bash
-# Inspect active core skills, stack fingerprints, and category rules
-python scripts/skill_vault.py config --show
+# Install background hooks, read-only MCP server, and plugin bundle
+skill-vault setup --agent auto --scope global
 
-# Initialize skill_archive/vault_config.json with universal defaults
-python scripts/skill_vault.py config --init
+# Dry-run JIT router scoring, tiers, and estimated token usage for a prompt
+skill-vault route "<prompt>" [--workspace <path>] [--mode hybrid|inline|pointer]
 
-# Protect or unprotect specific core foundation skills from auto-archiving/pruning
-python scripts/skill_vault.py config --add-core <skill_name>
-python scripts/skill_vault.py config --remove-core <skill_name>
+# Search archived skills using the BM25 index
+skill-vault search "<query>" [--category "<Category>"] [--limit 10]
 
-# Add custom workspace file/glob fingerprints and category keyword rules
-python scripts/skill_vault.py config --add-fingerprint "<Category>" "<pattern>"
-python scripts/skill_vault.py config --add-category-rule "<Category>" "<keyword>"
+# Inspect background routing telemetry (0-token turn rate, latency, top skills)
+skill-vault stats [--limit 100]
 
-# Dynamically update SKILL.md's router description with currently indexed categories
-python scripts/skill_vault.py config --sync-prompt
-```
+# Scan plugins/active directories, ingest updates, and prune non-core skills (respects hook dependencies)
+skill-vault sync [--dry-run] [--keep-active]
 
-Any individual skill's `SKILL.md` frontmatter can also declare:
-- `core: true` (or `pinned: true` / `always_active: true`) to automatically protect that skill during `sync` and `optimize`.
-- `category: "<Category>"` to pin its vault category without needing `--category` flags.
+# Re-classify 'General & Utility Skills' using built-in + custom rules
+skill-vault recategorize --auto [--dry-run]
 
-### M. Clean Uninstallation & Safe Decommissioning (`uninstall` / `eject`)
-To cleanly remove or replace `skill-vault` without losing any archived skills or overwriting newer active L1 versions:
-```bash
-# Preview restoration and cleanup plan without modifying files
-python scripts/skill_vault.py uninstall --dry-run
+# Consolidate hyphen/underscore duplicate skills in L2 (keeps newest version)
+skill-vault dedupe [--dry-run]
 
-# Restore all archived skills to L1 (preserving newer L1 versions), verify SKILL.md files, and remove archive + skill-vault
-python scripts/skill_vault.py uninstall
+# Inspect or tune routing thresholds & core skills
+skill-vault config --show
+skill-vault config --set-routing mode hybrid
+skill-vault config --set-routing show_ui_notice true
 
-# Keep skill_archive as a backup (relocates it out of skills/skill-vault if nested)
-python scripts/skill_vault.py uninstall --keep-archive
-
-# Restore all skills and clear archive, while keeping the skill-vault folder itself
-python scripts/skill_vault.py uninstall --keep-skill
-```
-
----
-
-## 3. Environment & OS Compatibility Guidelines
-
-- **Base Directory**: Auto-discovers the workspace root relative to the script location, current working directory, or via `--base-dir <path>` / `$SKILL_VAULT_BASE`.
-- **Portable Relative Links**: `INDEX.md` and `backup_manifest.json` use relative paths, allowing the skill repository to be committed to Git or shared across environments seamlessly.
-- **Pure Python**: Requires only Python 3 standard library (`os`, `sys`, `json`, `re`, `shutil`, `hashlib`, `argparse`, `pathlib`).
-
----
-
-## 4. Automated Testing Harness
-
-A sandboxed test suite is located in `tests/test_skill_vault.py` to prevent regressions whenever changes are made:
-
-```bash
-# Run test suite
-python -m unittest discover -s tests -v
+# Archive, restore, import, verify, or cleanly uninstall
+skill-vault archive <name> --category "<Category>"
+skill-vault restore <name>
+skill-vault import <name> --dest "./.agents/skills"
+skill-vault verify --fix
+skill-vault uninstall [--dry-run]
 ```

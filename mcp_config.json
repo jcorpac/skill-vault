@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "skill-vault": {
+      "command": "node",
+      "type": "stdio",
+      "args": ["bin/mcp.js"]
+    }
+  }
+}

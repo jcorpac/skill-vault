@@ -1,75 +1,73 @@
 # Skill Vault 🛡️
 
-[![CI Test Suite](https://github.com/jcorpac/skill-vault/actions/workflows/test.yml/badge.svg)](https://github.com/jcorpac/skill-vault/actions)
+[![CI Test Suite](https://github.com/jcorpac/skill-vault/actions/workflows/test.yml/badge.svg)](https://github.com/jcorp/skill-vault/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![npm version](https://img.shields.io/npm/v/@jcorpac/skill-vault.svg)](https://www.npmjs.com/package/@jcorpac/skill-vault)
 [![Agent Skills](https://img.shields.io/badge/Agent%20Skills-Standard-green.svg)](SKILL.md)
 
-> **Universal Agent Skill Router, Lifecycle Manager & Tiered Storage Engine for AI Coding Agents.**
-> Works across **Google Antigravity, Claude Code, Cursor, Windsurf, OpenCode, and CI/CD**.
+> **Automatic Background Skill Router, Read-Only JIT MCP Server & Tiered Cold-Storage Engine for AI Coding Agents.**
+> Works across **Google Antigravity, Claude Code, Gemini CLI, Cursor, and CI/CD**.
 
 ---
 
 ## ⚡ The Problem: Context Bloat & Skill Bleed
 
-As teams collect specialized skills (database admin, cloud deployment, bioinformatics, testing workflows), loading 50–100+ skills into active AI prompts causes:
-1. **Context Window Saturation**: Thousands of prompt tokens consumed before the conversation even starts.
-2. **Skill Bleed**: AI models get confused by conflicting tool instructions from unrelated frameworks.
-3. **Broken Manifests & Orphan Folders**: Manual directory changes leave dangling references.
+Loading 50–250+ specialized skills into active AI prompts causes:
+1. **Context Window Saturation**: Thousands of prompt tokens consumed before a conversation starts.
+2. **Skill Bleed**: Conflicting instructions from unrelated frameworks degrade tool selection and reasoning.
+3. **Manual Friction**: Constantly enabling/disabling plugins or approving CLI searches slows down every session.
 
-## 💡 The Solution: Tiered Skill Memory
+## 💡 The Solution: Zero-Approval Background JIT Orchestration
 
-**Skill Vault** implements a **two-tier memory model**:
-- **L1 Active Memory (`skills/`)**: Lightweight general-purpose skills actively loaded in context.
-- **L2 Cold Storage (`skill_archive/`)**: Deep domain skills indexed in metadata, searchable in milliseconds, and dynamically mounted or restored on demand.
+**Skill Vault v2.0** keeps **L1 Active Context** permanently minimal (core skills only) while giving the agent **automatic, zero-approval access** to every skill stored in **L2 Cold Storage (`skill_archive/`)**:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                       AI CODING AGENT                       │
-│    (Google Antigravity / Claude Code / Cursor / Windsurf)   │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-               ┌───────────────┴───────────────┐
-               ▼                               ▼
-    [L1 Active Context Memory]     [L2 Cold Storage Archive]
-       ./.agents/skills/              ./skill_archive/skills/
-     - general-git-workflow         - alloydb-omni-cluster
-     - managing-python-deps         - gcp-composer-troubleshoot
-                                    - alphafold-protein-analysis
-               │                               ▲
-               │  npx @jcorpac/skill-vault     │
-               │  archive                      │
-               ├──────────────────────────────►│
-               │  npx @jcorpac/skill-vault     │
-               │  restore                      │
-               │◄──────────────────────────────┤
+```text
+┌─────────────────────────────────────────────────────────────────────────┐
+│                             AI CODING AGENT                             │
+│          (Google Antigravity / Claude Code / Gemini CLI / Cursor)       │
+└──────────────┬────────────────────────────────────────┬─────────────────┘
+               │                                        │
+   [1. Background Lifecycle Hooks]         [2. Mid-Turn Read-Only MCP]
+     • SessionStart (silent sync & index)    • search_skills(query)
+     • PreInvocation / UserPromptSubmit      • load_skill(name, file?)
+       └─► Pre-built BM25 + Multi-Signal Router (~50–90ms, no approvals)
+           ├─ Unrelated prompt  ──► Injects 0 tokens
+           ├─ High confidence   ──► Inlines top 1–2 SKILL.md (<=12 KB cap)
+           └─ Broad / medium    ──► Emits 1-line compact pointers
+               │                                        │
+               └───────────────────┬────────────────────┘
+                                   ▼
+                      [L2 Cold Storage Archive]
+                    skill_archive/search_index.json
+                    skill_archive/backup_manifest.json
+                    skill_archive/skills/<skill_name>/
 ```
 
 ---
 
 ## 🚀 Quickstart
 
-### Option 1: Run via `npx` (Zero Installation)
-```bash
-# Initialize a repository for skill storage
-npx @jcorpac/skill-vault init
+### 1. One-Command Setup (Recommended)
+Install the background lifecycle hooks, read-only MCP server, and pre-built search index for your agent:
 
-# Search indexed skills
-npx @jcorpac/skill-vault search "database"
+```bash
+# Auto-detect installed agents (Antigravity, Claude Code, Gemini CLI, Cursor)
+npx @jcorpac/skill-vault setup
+
+# Or target Antigravity explicitly (and migrate legacy nested archive if present)
+npx @jcorpac/skill-vault setup --agent antigravity --migrate-archive
+```
+
+### 2. Run Directly via Python CLI (Pure Standard Library)
+```bash
+# Test what the background router injects for any prompt
+python scripts/skill_vault.py route "optimize slow postgres query"
+
+# Check routing telemetry (0-token turn %, latency, top skills)
+python scripts/skill_vault.py stats
 
 # Verify archive integrity
-npx @jcorpac/skill-vault verify --fix
-```
-
-### Option 2: Install as an Agent Skill
-Install directly into Claude Code, Antigravity, or Cursor:
-```bash
-npx skills add jcorpac/skill-vault
-```
-
-### Option 3: Use with Python CLI (Pure Standard Library)
-```bash
-python scripts/skill_vault.py verify
+python scripts/skill_vault.py verify --fix
 ```
 
 ---
@@ -78,67 +76,38 @@ python scripts/skill_vault.py verify
 
 | Command | Description |
 | :--- | :--- |
-| `skill-vault init` | Bootstrap standard skill and archive folders in workspace. |
-| `skill-vault optimize` | Auto-minimize active skills to essential Core + workspace stack. |
-| `skill-vault optimize --dry-run` | Preview auto-minimization changes without moving files. |
-| `skill-vault list` | Present all active skills (L1) and archived skills (L2). |
-| `skill-vault status` | Fast summary of skill counts and category breakdown. |
-| `skill-vault list --active` | List only active skills currently loaded in context memory. |
-| `skill-vault list --archived` | List only cold-storage skills grouped by category. |
-| `skill-vault archive <name> --category "<Cat>"` | Move active skill to archive with category metadata (preserves newer L2 copies). |
-| `skill-vault archive <name> --force` | Force archive overwrite regardless of archive recency. |
-| `skill-vault archive --pattern "gcp-*"` | Archive multiple matching skills via glob pattern. |
-| `skill-vault recategorize <name> "<New Cat>"` | Reorganize skill category without modifying `SKILL.md`. |
-| `skill-vault restore <name>` | Restore an archived skill back to active availability (auto-upgrades if L2 is newer). |
-| `skill-vault restore <name> --force` | Force restore overwrite regardless of active recency. |
-| `skill-vault restore --category "<Cat>"` | Restore all skills in a specific category. |
-| `skill-vault search "<query>"` | Search skills across names, descriptions, and categories. |
-| `skill-vault reindex` | Regenerate `INDEX.md` and sync `backup_manifest.json`. |
-| `skill-vault sync` | Auto-scan plugins & active dirs, ingest new/updated skills, and prune non-core skills. |
-| `skill-vault sync --dry-run` | Preview new/updated skills to ingest without moving or deleting files. |
-| `skill-vault sync --keep-active` | Ingest new/updated skills into the vault while keeping all active. |
-| `skill-vault import <name>` | Import a skill from vault into project directory (e.g. `./skills` or `./.agents/skills`). |
-| `skill-vault import --category "<Cat>"` | Import all skills in a category into the current project. |
-| `skill-vault import --pattern "gcp-*"` | Import matching skills via glob pattern into the project. |
-| `skill-vault import <name> --dest <path>` | Import skill into an explicit project destination folder. |
-| `skill-vault import <name> --vault-dir <path>` | Import from an explicit source vault (defaults to global archive or base). |
-| `skill-vault import <name> --force` | Overwrite existing project skill regardless of recency. |
-| `skill-vault import <name> --dry-run` | Preview what would be imported without copying files. |
-| `skill-vault config --show` | Inspect effective core skills, stack fingerprints, and category rules. |
-| `skill-vault config --init` | Write `skill_archive/vault_config.json` with universal defaults for customization. |
-| `skill-vault config --add-core <name>` | Add a skill to protected Core Foundation Skills (or use `--remove-core`). |
-| `skill-vault config --add-fingerprint "<Cat>" "<pat>"` | Add a workspace file/glob fingerprint to a skill category. |
-| `skill-vault config --add-category-rule "<Cat>" "<kw>"` | Add a keyword rule for automatic skill categorization. |
-| `skill-vault config --sync-prompt` | Dynamically update `SKILL.md`'s router description with your vault's categories. |
-| `skill-vault verify` | Audit bi-directional consistency across disk, manifest, and index. |
-| `skill-vault verify --fix` | Audit and automatically self-heal all detected discrepancies. |
-| `skill-vault uninstall` | Cleanly restore all archived skills to L1 (preserving newer L1 versions), verify, and remove archive + `skill-vault` (alias: `eject`). |
-| `skill-vault uninstall --dry-run` | Preview the uninstall restoration and cleanup plan without modifying files. |
-| `skill-vault uninstall --keep-archive` | Restore all skills to L1 and remove `skill-vault`, while preserving/relocating `skill_archive`. |
+| `skill-vault setup` | Install background hooks, read-only MCP server, and plugin bundle (`--agent`, `--scope`, `--migrate-archive`, `--dry-run`). |
+| `skill-vault route "<prompt>"` | Dry-run the JIT router and inspect BM25 scores, tiers (`INLINE`/`POINTER`), and estimated token budget. |
+| `skill-vault stats` | Summarize local routing telemetry (`0`-token turn %, avg/p95 latency, top matched skills). |
+| `skill-vault search "<query>"` | Multi-term BM25 search across skill names, tags, descriptions, headings, and body identifiers. |
+| `skill-vault sync` | Scan plugins & active dirs, ingest updates, prune non-core skills (automatically protecting hook/MCP dependencies). |
+| `skill-vault recategorize --auto` | Re-classify `"General & Utility Skills"` using expanded domain rules. |
+| `skill-vault dedupe` | Consolidate hyphen/underscore duplicate skills in L2 while keeping the newest version. |
+| `skill-vault list` / `status` | Present active (L1) and archived (L2) skills and category counts. |
+| `skill-vault archive` / `restore` | Move specific skills or categories between L1 and L2 (recency-aware). |
+| `skill-vault import <name>` | Copy vaulted skills into a project's `.agents/skills` or `skills/` directory. |
+| `skill-vault optimize` | Prune/mount active skills using workspace file fingerprints. |
+| `skill-vault config` | Inspect or customize core skills, fingerprints, category rules, and `--set-routing` thresholds. |
+| `skill-vault reindex` / `verify` | Rebuild `INDEX.md` + `search_index.json` and audit archive integrity. |
+| `skill-vault uninstall` | Safely restore all archived skills to L1 and remove Skill Vault wiring & files (`eject` alias). |
 
 ---
 
 ## 🎯 Key Design Principles
 
-1. **`SKILL.md` Purity**: `SKILL.md` files are immutable instructions. Categories and routing metadata are stored strictly in `backup_manifest.json` and rendered in `INDEX.md`.
-2. **Environment Agnostic**: Dynamically resolves workspace roots via CLI flags (`--base-dir`), environment variables (`$SKILL_VAULT_BASE`), script parents, or working directories.
-3. **Zero Runtime Dependencies**: The core engine requires only Python 3 standard library (`os`, `sys`, `json`, `re`, `shutil`, `hashlib`, `argparse`, `pathlib`).
-4. **Self-Healing Integrity**: Detects orphaned folders, phantom manifest entries, broken markdown links, and duplicate aliases.
-5. **Recency & Version Prioritization**: Automatically protects newer versions when archiving, restoring, or optimizing by evaluating semantic version tags (`version:`) with filesystem timestamp (`mtime`) fallbacks. Use `--force` to override.
-6. **Universal Cross-Ecosystem Stack Detection**: Includes built-in workspace fingerprinting and category inference across Frontend, Backend, Cloud/DevOps, Databases, Mobile, AI/ML, Testing/Security, Data Engineering, and Science — fully extensible via `vault_config.json` and `SKILL.md` frontmatter (`core: true`, `category:`).
-7. **Dynamic Router Prompt Syncing**: `reindex` and `config --sync-prompt` automatically keep `skill-vault`'s `SKILL.md` frontmatter description synchronized with the exact skills and categories in the user's own vault.
+1. **Zero Context Bloat by Default**: Generic prompts (`"Refactor this function"`, `"Write a git commit message"`) inject **0 tokens**. Same-turn tool-call loops short-circuit automatically, and already-injected skills never re-inject in the same conversation.
+2. **Zero-Approval Background Execution**: Hooks run natively in the agent lifecycle before the model is called; mid-turn fallback uses a 2-tool read-only MCP server (`search_skills`, `load_skill`) with strict directory-containment guards.
+3. **`SKILL.md` Purity**: `SKILL.md` files are never modified during indexing or categorization.
+4. **Hook-Dependency Safety**: `sync`, `optimize`, and `archive` inspect sibling `hooks.json` and `mcp_config.json` files so plugin-referenced skill scripts are never accidentally pruned.
+5. **Zero Runtime Dependencies**: Pure Python 3.10+ standard library across Windows, macOS, and Linux.
 
 ---
 
 ## 🧪 Running the Test Suite
 
-Skill Vault includes a comprehensive, sandboxed test harness:
-
 ```bash
-# Run unit tests
 python -m unittest discover -s tests -v
-
-# Or via npm
+# Or via npm:
 npm test
 ```
 

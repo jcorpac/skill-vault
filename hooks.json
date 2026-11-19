@@ -1,0 +1,20 @@
+{
+  "skill-vault-session-sync": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node bin/hook.js --harness antigravity --event SessionStart",
+        "timeout": 30
+      }
+    ]
+  },
+  "skill-vault-jit-router": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "node bin/hook.js --harness antigravity --event PreInvocation",
+        "timeout": 10
+      }
+    ]
+  }
+}

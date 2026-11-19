@@ -7,6 +7,7 @@ strictly in backup_manifest.json and INDEX.md, keeping SKILL.md files pure and u
 """
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
@@ -14,6 +15,12 @@ from pathlib import Path
 import re
 import shutil
 import sys
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import skill_router  # noqa: E402
 
 # Default Core Foundation Skills that are protected from auto-archiving
 DEFAULT_CORE_SKILLS = {
@@ -121,6 +128,15 @@ WORKSPACE_FINGERPRINTS = {
         "build.gradle.kts",
         "AndroidManifest.xml",
     ],
+    "Firebase": [
+        "firebase.json",
+        "firestore.rules",
+        ".firebaserc",
+    ],
+    "Robotics & MuJoCo": [
+        "*.urdf",
+        "*.mjcf",
+    ],
 }
 
 DEFAULT_WORKSPACE_FINGERPRINTS = WORKSPACE_FINGERPRINTS
@@ -128,9 +144,58 @@ DEFAULT_WORKSPACE_FINGERPRINTS = WORKSPACE_FINGERPRINTS
 # Default keyword rules for auto-categorizing skills across universal ecosystems
 DEFAULT_CATEGORY_RULES = {
     "Knowledge & Wiki Architecture": [
-        "egm-",
         "wiki",
+        "knowledge base",
         "documentation architecture",
+    ],
+    "Firebase": [
+        "firebase",
+        "firestore",
+        "crashlytics",
+        "remote config",
+        "app hosting",
+        "firebase auth",
+    ],
+    "Google Workspace": [
+        "gmail",
+        "gcalendar",
+        "gdocs",
+        "gdrive",
+        "gsheets",
+        "gslides",
+        "google workspace",
+        "google calendar",
+        "google docs",
+        "google sheets",
+        "google slides",
+        "google drive",
+    ],
+    "Robotics & MuJoCo": [
+        "mujoco",
+        "mjcf",
+        "urdf",
+        "robotics",
+        "kinematics",
+        "inverse kinematics",
+        "gripper",
+        "actuator",
+    ],
+    "Chrome DevTools & Web Performance": [
+        "chrome-devtools",
+        "chrome devtools",
+        "chrome-extension",
+        "chrome extension",
+        "memory leak",
+        "memory-leak",
+        "lcp",
+        "core web vitals",
+        "lighthouse",
+    ],
+    "Google Maps & Geo": [
+        "google-maps",
+        "google_maps",
+        "maps-platform",
+        "maps platform",
     ],
     "Gemini API & AI Agents": [
         "gemini",
@@ -205,6 +270,13 @@ DEFAULT_CATEGORY_RULES = {
         "pubsub",
         "cloud storage",
         "cloud run",
+        "bigtable",
+        "gcloud",
+        "gcs",
+        "google-cloud",
+        "google_cloud",
+        "spark",
+        "lakehouse",
     ],
     "Testing, QA & Security": [
         "playwright",
@@ -387,26 +459,42 @@ def resolve_base_dir(cli_base=None):
         if p.exists():
             return p
 
-    # Check ancestors of the script location
+    # 1. Prioritize ancestors of the script location that actually contain a skill_archive
     script_path = Path(__file__).resolve()
     for parent in script_path.parents:
-        if parent.name != "skill_archive" and (
-            (parent / "skill_archive").exists() or (parent / "skills").exists()
-        ):
+        if parent.name != "skill_archive" and (parent / "skill_archive").exists():
             return parent
 
     cwd = Path.cwd().resolve()
-    for candidate in [
+    home = Path.home()
+    candidates = [
         cwd,
         cwd / ".agents",
         cwd / ".claude",
-        Path.home() / ".gemini" / "config",
-        Path.home() / ".agents",
-        Path.home() / ".claude",
-    ]:
-        if candidate.exists() and (
-            (candidate / "skills").exists() or (candidate / "skill_archive").exists()
-        ):
+        cwd / ".gemini",
+        cwd / ".cursor",
+        home / ".gemini" / "config",
+        home / ".gemini" / "config" / "skills" / "skill-vault",
+        home / ".agents",
+        home / ".claude",
+        home / ".gemini",
+        home / ".cursor",
+    ]
+    # 2. Check standard workspace and global locations for an existing skill_archive
+    for candidate in candidates:
+        if candidate.exists() and (candidate / "skill_archive").exists():
+            return candidate
+
+    # 3. Fallback to ancestors with skills/ (skipping installed plugins/skill-vault wrapper)
+    for parent in script_path.parents:
+        if parent.name == "skill-vault" and parent.parent.name == "plugins":
+            continue
+        if parent.name != "skill_archive" and (parent / "skills").exists():
+            return parent
+
+    # 4. Fallback to workspace or global locations with skills/
+    for candidate in candidates:
+        if candidate.exists() and (candidate / "skills").exists():
             return candidate
 
     return cwd
@@ -414,10 +502,12 @@ def resolve_base_dir(cli_base=None):
 
 class SkillVault:
     def __init__(self, base_dir=None):
+        self._explicit_base_dir = bool(base_dir)
         self.base_dir = resolve_base_dir(base_dir)
         self.archive_dir = self.base_dir / "skill_archive"
         self.manifest_file = self.archive_dir / "backup_manifest.json"
         self.index_file = self.archive_dir / "INDEX.md"
+        self.search_index_file = self.archive_dir / "search_index.json"
         self.config_file = self.archive_dir / "vault_config.json"
         self.skills_dir = self.base_dir / "skills"
 
@@ -459,11 +549,16 @@ class SkillVault:
             if cat not in merged_rules:
                 merged_rules[cat] = list(kws)
 
+        routing_cfg = dict(skill_router.DEFAULT_ROUTING_CONFIG)
+        if isinstance(user_cfg.get("routing"), dict):
+            routing_cfg.update(user_cfg["routing"])
+
         return {
             "core_skills": sorted(core_skills),
             "disabled_core_skills": sorted(disabled_core),
             "workspace_fingerprints": merged_fp,
             "category_rules": merged_rules,
+            "routing": routing_cfg,
         }
 
     def save_config(self, config_data):
@@ -705,16 +800,59 @@ class SkillVault:
         return self.base_dir
 
     def get_skill_vault_dir(self):
-        """Locate the installed skill-vault skill directory if present (excluding git repo roots)."""
-        if self.base_dir.name == "skill-vault" and self.base_dir.parent.name == "skills":
+        """Locate the installed skill-vault skill/plugin directory if present (excluding git repo roots)."""
+        if self.base_dir.name == "skill-vault" and self.base_dir.parent.name in ("skills", "plugins"):
             if not (self.base_dir / ".git").exists():
                 return self.base_dir
         root_dir = self.get_root_dir()
-        for rel in ["skills/skill-vault", ".agents/skills/skill-vault", ".claude/skills/skill-vault"]:
+        for rel in [
+            "plugins/skill-vault",
+            "skills/skill-vault",
+            ".agents/skills/skill-vault",
+            ".claude/skills/skill-vault",
+        ]:
             cand = (root_dir / rel).resolve()
             if cand.exists() and not (cand / ".git").exists():
                 return cand
         return None
+
+    def get_hook_protected_skills(self):
+        """Inspect plugin hooks.json and mcp_config.json files to protect skills referenced by commands."""
+        protected = {"skill-vault"}
+        plugin_roots = []
+        for cand in (self.base_dir / "plugins", self.get_root_dir() / "plugins"):
+            if cand.exists() and cand.is_dir():
+                res = cand.resolve()
+                if res not in plugin_roots:
+                    plugin_roots.append(res)
+
+        skill_ref_re = re.compile(r"(?:^|[\s\"'=/\\])skills[/\\]([a-zA-Z0-9._-]+)")
+
+        def _scan_obj(obj):
+            if isinstance(obj, str):
+                for m in skill_ref_re.finditer(obj):
+                    protected.add(m.group(1))
+            elif isinstance(obj, list):
+                for item in obj:
+                    _scan_obj(item)
+            elif isinstance(obj, dict):
+                for val in obj.values():
+                    _scan_obj(val)
+
+        for proot in plugin_roots:
+            for pdir in proot.iterdir():
+                if not pdir.is_dir():
+                    continue
+                for cfg_name in ("hooks.json", "mcp_config.json"):
+                    cfg_path = pdir / cfg_name
+                    if not cfg_path.exists():
+                        continue
+                    try:
+                        data = json.loads(cfg_path.read_text(encoding="utf-8", errors="replace"))
+                        _scan_obj(data)
+                    except Exception:
+                        pass
+        return protected
 
     def make_portable_path(self, abs_path):
         """Convert path to relative from base_dir or root_dir if possible."""
@@ -837,43 +975,55 @@ class SkillVault:
     # --- Workspace & Optimization Engine ---
 
     def detect_workspace_categories(self, workspace_path=None):
-        """Inspect workspace files and return matched skill categories."""
+        """Inspect workspace files in a single depth-bounded pass and return matched skill categories."""
         target_ws = Path(workspace_path).resolve() if workspace_path else Path.cwd().resolve()
         matched = {}
         config = self.load_config()
         fingerprints = config["workspace_fingerprints"]
 
+        if not target_ws.exists():
+            return matched
+
+        ignored_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", ".tox", "dist", "build", ".next", "target"}
+        seen_names = set()
+        seen_rel_paths = set()
+        ws_tokens = {}
+
+        for root, dirs, files in os.walk(target_ws):
+            dirs[:] = [d for d in dirs if d not in ignored_dirs]
+            rel_path = Path(root).relative_to(target_ws)
+            rel_depth = len(rel_path.parts)
+            if rel_depth > 3:
+                dirs[:] = []
+                continue
+            rel_prefix = "" if rel_path == Path(".") else rel_path.as_posix().lower() + "/"
+            for entry_name in dirs + files:
+                low_name = entry_name.lower()
+                seen_names.add(low_name)
+                seen_rel_paths.add(rel_prefix + low_name)
+                tokens = {t for t in re.split(r"[-_.\s]+", low_name) if t}
+                for tok in tokens:
+                    ws_tokens.setdefault(tok, entry_name)
+
         for category, patterns in fingerprints.items():
             for pat in patterns:
-                if "*" in pat:
-                    matches = list(target_ws.glob(pat)) + list(target_ws.glob(f"**/{pat}"))[:5]
-                    if matches:
-                        matched.setdefault(category, []).append(pat)
-                        break
+                pat_l = str(pat).lower()
+                if "*" in pat_l or "?" in pat_l:
+                    hit = any(fnmatch.fnmatchcase(n, pat_l) for n in seen_names) or any(
+                        fnmatch.fnmatchcase(rp, pat_l) for rp in seen_rel_paths
+                    )
                 else:
-                    if (target_ws / pat).exists() or list(target_ws.glob(f"**/{pat}"))[:1]:
-                        matched.setdefault(category, []).append(pat)
-                        break
+                    hit = (pat_l in seen_names) or (pat_l in seen_rel_paths)
+                if hit:
+                    matched.setdefault(category, []).append(pat)
+                    break
 
         # Inspect categories present in manifest for workspace filename/directory keyword matches
         manifest = self.load_manifest()
         manifest_categories = {m.get("category") for m in manifest if m.get("category")}
         unmatched_cats = [c for c in sorted(manifest_categories) if c not in matched]
-        if unmatched_cats and target_ws.exists():
+        if unmatched_cats:
             stop_words = {"and", "the", "skills", "general", "utility"}
-            ignored_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", ".tox", "dist", "build"}
-            ws_tokens = {}
-            for root, dirs, files in os.walk(target_ws):
-                dirs[:] = [d for d in dirs if d not in ignored_dirs]
-                rel_depth = len(Path(root).relative_to(target_ws).parts)
-                if rel_depth > 3:
-                    dirs[:] = []
-                    continue
-                for entry_name in dirs + files:
-                    tokens = {t for t in re.split(r"[-_.\s]+", entry_name.lower()) if t}
-                    for tok in tokens:
-                        ws_tokens.setdefault(tok, entry_name)
-
             for cat in unmatched_cats:
                 words = [
                     w.lower()
@@ -895,6 +1045,7 @@ class SkillVault:
         """
         target_ws = Path(workspace_path).resolve() if workspace_path else Path.cwd().resolve()
         core_set = self.get_core_skills(protected_skills)
+        hook_protected = self.get_hook_protected_skills()
 
         print("==================================================")
         print("          SKILL VAULT AUTO-OPTIMIZATION")
@@ -923,6 +1074,8 @@ class SkillVault:
             skill_md_path = Path(data["path"]) / "SKILL.md"
             if name in core_set:
                 to_keep.append((name, "Core Foundation Skill"))
+            elif name in hook_protected:
+                to_keep.append((name, "Protected Plugin Hook/MCP Dependency"))
             elif self.is_core_skill_frontmatter(skill_md_path):
                 to_keep.append((name, "Core Foundation Skill (Pinned in Frontmatter)"))
             else:
@@ -1014,14 +1167,7 @@ class SkillVault:
             if explicit_cat:
                 return explicit_cat
 
-        if skill_name in self.get_core_skills() or skill_name in [
-            "gmail",
-            "gcalendar",
-            "gslides",
-            "gdocs",
-            "gdrive",
-            "gsheets",
-        ]:
+        if skill_name in self.get_core_skills():
             return "General & Utility Skills"
 
         rules = self.load_config()["category_rules"]
@@ -1045,6 +1191,7 @@ class SkillVault:
         print("==================================================\n")
 
         core_set = self.get_core_skills(protect_skills)
+        hook_protected = self.get_hook_protected_skills()
 
         active_skills = self.get_active_skills()
         manifest = self.load_manifest()
@@ -1055,6 +1202,7 @@ class SkillVault:
         to_prune = []
         in_sync = []
         retained_core = []
+        protected_hooks = []
 
         for name, data in sorted(active_skills.items()):
             if name == "skill-vault":
@@ -1064,6 +1212,7 @@ class SkillVault:
             active_path = Path(data["path"])
             skill_md_path = active_path / "SKILL.md"
             is_core = (name in core_set) or self.is_core_skill_frontmatter(skill_md_path)
+            is_hook_dep = name in hook_protected
 
             if name in manifest_map:
                 item = manifest_map[name]
@@ -1088,6 +1237,8 @@ class SkillVault:
 
             if is_core:
                 retained_core.append(name)
+            elif is_hook_dep:
+                protected_hooks.append(name)
             elif not keep_active:
                 to_prune.append((name, data))
 
@@ -1102,6 +1253,10 @@ class SkillVault:
 
         print(f"  * In-sync skills in vault:             {len(in_sync)}")
         print(f"  * Retained Core Foundation Skills:     {len(retained_core)} ({', '.join(sorted(retained_core))})")
+        if protected_hooks:
+            print(f"  * Hook/MCP-Protected Plugin Skills:    {len(protected_hooks)}")
+            for name in sorted(protected_hooks):
+                print(f"    [Protected (Hook Dependency)] {name}")
         print(f"  * Non-core active skills to prune:     {len(to_prune)}")
         for name, _ in to_prune:
             print(f"    [PRUNE] {name} (Will be removed from active context to prevent context bloat)")
@@ -1254,6 +1409,7 @@ class SkillVault:
         """Archive active skills with an assigned category, prioritizing newer versions."""
         manifest = self.load_manifest()
         manifest_map = {item["name"]: item for item in manifest}
+        hook_protected = self.get_hook_protected_skills()
 
         skills_to_archive = []
         if name:
@@ -1285,8 +1441,11 @@ class SkillVault:
                 if recency < 0 and not force:
                     print(f"[Skip] L2 archive '{skill_name}' is newer than active L1 version. Preserving newer archive (use --force to overwrite).")
                     if not keep_active:
-                        shutil.rmtree(active_path)
-                        print(f"[Cleaned] Removed older active directory: {active_path}")
+                        if skill_name in hook_protected:
+                            print(f"[Protected (Hook Dependency)] Preserving active '{skill_name}' (referenced by plugin hooks/MCP; use --force to override)")
+                        else:
+                            shutil.rmtree(active_path)
+                            print(f"[Cleaned] Removed older active directory: {active_path}")
                     continue
                 elif recency > 0:
                     print(f"[Archived] Overwriting older L2 archive with newer active L1 version: {active_path} -> {dest_dir}")
@@ -1315,27 +1474,70 @@ class SkillVault:
             }
 
             if not keep_active:
-                shutil.rmtree(active_path)
-                print(f"[Cleaned] Removed active directory: {active_path}")
+                if skill_name in hook_protected and not force:
+                    print(f"[Protected (Hook Dependency)] Preserving active '{skill_name}' (referenced by plugin hooks/MCP; use --force to override)")
+                else:
+                    shutil.rmtree(active_path)
+                    print(f"[Cleaned] Removed active directory: {active_path}")
 
         self.save_manifest(list(manifest_map.values()))
         self.reindex()
         print("Archiving complete.")
 
-    def recategorize(self, name, new_category):
-        """Update category for an archived skill."""
+    def recategorize(self, name=None, new_category=None, auto=False, dry_run=False):
+        """Update category for an archived skill, or auto-recategorize General & Utility Skills."""
         manifest = self.load_manifest()
         manifest_map = {item["name"]: item for item in manifest}
 
+        if auto:
+            updates = []
+            scanned_general = 0
+            for item in manifest:
+                cur_cat = item.get("category") or "General & Utility Skills"
+                if cur_cat != "General & Utility Skills":
+                    continue
+                scanned_general += 1
+                archived_path = self.resolve_portable_path(item.get("archived_path", ""))
+                skill_md = archived_path / "SKILL.md"
+                desc = self.parse_skill_description(skill_md) if skill_md.exists() else ""
+                inferred = self.infer_category(item["name"], desc, skill_md if skill_md.exists() else None)
+                if inferred and inferred != "General & Utility Skills":
+                    updates.append((item["name"], cur_cat, inferred))
+                    if not dry_run:
+                        item["category"] = inferred
+
+            print("==================================================")
+            print("         SKILL VAULT AUTO-RECATEGORIZATION")
+            print(f"  General skills scanned: {scanned_general}")
+            print(f"  Improved categories:    {len(updates)}")
+            print("==================================================\n")
+            for sname, old_c, new_c in updates:
+                print(f"  * {sname}: '{old_c}' -> '{new_c}'")
+
+            if dry_run:
+                print("\n[Dry Run] Auto-recategorization preview complete. No changes saved.")
+                return 0
+
+            if updates:
+                self.save_manifest(manifest)
+                self.reindex()
+            print(f"\n[OK] Recategorized {len(updates)} skill(s).")
+            return 0
+
+        if not name or not new_category:
+            print("[Error] Please specify skill name and new category, or pass --auto.")
+            return 1
+
         if name not in manifest_map:
             print(f"[Error] Skill '{name}' not found in manifest.")
-            return
+            return 1
 
         old_cat = manifest_map[name].get("category", "Uncategorized")
         manifest_map[name]["category"] = new_category.strip()
         self.save_manifest(list(manifest_map.values()))
         self.reindex()
         print(f"[Recategorized] '{name}': '{old_cat}' -> '{new_category.strip()}'")
+        return 0
 
     def restore(self, name=None, pattern=None, category=None, restore_all=False, force=False):
         """Restore archived skills back to active locations."""
@@ -1389,6 +1591,105 @@ class SkillVault:
             print(f"[Restored] {skill_name} -> {original_path}")
 
         print("Restoration complete.")
+
+    def _find_external_harness_configs(self):
+        """Return existing harness config files that contain skill-vault hook/MCP entries."""
+        root_dir = self.get_root_dir().resolve()
+        home = Path.home().resolve()
+        candidates = [
+            root_dir / ".claude" / "settings.json",
+            root_dir / ".gemini" / "settings.json",
+            root_dir / ".cursor" / "mcp.json",
+        ]
+        global_roots = {
+            home,
+            (home / ".gemini" / "config").resolve(),
+            (home / ".claude").resolve(),
+            (home / ".agents").resolve(),
+        }
+        if root_dir in global_roots:
+            candidates.extend([
+                home / ".claude" / "settings.json",
+                home / ".gemini" / "settings.json",
+                home / ".cursor" / "mcp.json",
+            ])
+
+        matched = []
+        seen = set()
+        for p in candidates:
+            res = p.resolve()
+            if res in seen or not p.exists():
+                continue
+            seen.add(res)
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+                if "skill-vault" in text or "hook_runner.py" in text or "mcp_server.py" in text:
+                    matched.append(p)
+            except OSError:
+                pass
+        return matched
+
+    @staticmethod
+    def _clean_external_harness_config(cfg_path):
+        """Surgically remove skill-vault hook/MCP entries from an external harness JSON config."""
+        cfg_path = Path(cfg_path)
+        if not cfg_path.exists():
+            return False
+        try:
+            data = json.loads(cfg_path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            return False
+        if not isinstance(data, dict):
+            return False
+
+        changed = False
+        mcp = data.get("mcpServers")
+        if isinstance(mcp, dict) and "skill-vault" in mcp:
+            del mcp["skill-vault"]
+            if not mcp:
+                del data["mcpServers"]
+            changed = True
+
+        hooks = data.get("hooks")
+        if isinstance(hooks, dict):
+            for evt in list(hooks.keys()):
+                groups = hooks.get(evt)
+                if not isinstance(groups, list):
+                    continue
+                new_groups = []
+                for grp in groups:
+                    if not isinstance(grp, dict):
+                        new_groups.append(grp)
+                        continue
+                    sub_hooks = grp.get("hooks")
+                    if isinstance(sub_hooks, list):
+                        kept = [
+                            h for h in sub_hooks
+                            if not (
+                                isinstance(h, dict)
+                                and ("hook_runner.py" in str(h.get("command", "")) or "skill-vault" in str(h.get("command", "")))
+                            )
+                        ]
+                        if len(kept) != len(sub_hooks):
+                            changed = True
+                        if kept:
+                            grp_copy = dict(grp)
+                            grp_copy["hooks"] = kept
+                            new_groups.append(grp_copy)
+                    else:
+                        new_groups.append(grp)
+                if new_groups:
+                    hooks[evt] = new_groups
+                else:
+                    del hooks[evt]
+            if not hooks:
+                del data["hooks"]
+
+        if changed:
+            tmp = cfg_path.with_name(f".{cfg_path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            os.replace(tmp, cfg_path)
+        return changed
 
     def uninstall(self, dry_run=False, force=False, keep_archive=False, keep_skill=False):
         """Cleanly restore all archived skills to L1 without overwriting newer L1 versions and remove skill-vault."""
@@ -1483,10 +1784,22 @@ class SkillVault:
         else:
             print(f"  * Archive:  Remove {self.archive_dir}")
 
-        if keep_skill or not sv_dir:
+        sv_dirs = []
+        for cand in [sv_dir, root_dir / "plugins" / "skill-vault", root_dir / "skills" / "skill-vault"]:
+            if cand and cand.exists() and not (cand / ".git").exists():
+                resolved_cand = cand.resolve()
+                if resolved_cand not in sv_dirs:
+                    sv_dirs.append(resolved_cand)
+
+        if keep_skill or not sv_dirs:
             print(f"  * Skill:    Keep {sv_dir if sv_dir else '(None detected)'}")
         else:
-            print(f"  * Skill:    Remove {sv_dir}")
+            for d in sv_dirs:
+                print(f"  * Skill:    Remove {d}")
+
+        harness_targets = [] if keep_skill else self._find_external_harness_configs()
+        for hpath in harness_targets:
+            print(f"  * Wiring:   Remove skill-vault entries from {hpath}")
         print("")
 
         if missing_sources:
@@ -1509,8 +1822,8 @@ class SkillVault:
         dirs_to_delete = []
         if not keep_archive and self.archive_dir.exists():
             dirs_to_delete.append(self.archive_dir.resolve())
-        if sv_dir and not keep_skill and sv_dir.exists():
-            dirs_to_delete.append(sv_dir.resolve())
+        if not keep_skill:
+            dirs_to_delete.extend(sv_dirs)
 
         verification_errors = []
         for skill_name, _, original_path, _ in to_restore + to_upgrade + to_preserve:
@@ -1550,12 +1863,17 @@ class SkillVault:
                 shutil.rmtree(self.archive_dir)
                 print(f"[Removed] Archive directory: {self.archive_dir}")
 
-        if sv_dir and not keep_skill and sv_dir.exists():
-            cwd_resolved = Path.cwd().resolve()
-            if cwd_resolved == sv_dir.resolve() or sv_dir.resolve() in cwd_resolved.parents:
-                os.chdir(root_dir)
-            shutil.rmtree(sv_dir)
-            print(f"[Removed] Skill-vault directory: {sv_dir}")
+        if not keep_skill:
+            for d in sv_dirs:
+                if d.exists():
+                    cwd_resolved = Path.cwd().resolve()
+                    if cwd_resolved == d or d in cwd_resolved.parents:
+                        os.chdir(root_dir)
+                    shutil.rmtree(d)
+                    print(f"[Removed] Skill-vault directory: {d}")
+            for hpath in harness_targets:
+                if self._clean_external_harness_config(hpath):
+                    print(f"[Cleaned] Removed skill-vault entries from: {hpath}")
 
         total_safe = len(to_restore) + len(to_upgrade) + len(to_preserve)
         print(f"\n[OK] Clean uninstall complete! {total_safe} skill(s) verified safe in active L1 locations.")
@@ -1622,10 +1940,24 @@ class SkillVault:
             f.write("\n".join(lines).strip() + "\n")
 
         self.save_manifest(list(manifest_by_folder.values()))
+        skill_router.build_search_index(
+            archive_dir=self.archive_dir,
+            manifest=list(manifest_by_folder.values()),
+            base_dir=self.base_dir,
+            resolve_path_fn=self.resolve_portable_path,
+        )
         updated_routers = self.sync_router_md()
         for r_path in updated_routers:
             print(f"[Router Synced] Updated SKILL.md frontmatter: {r_path}")
         print(f"[Reindexed] {total_count} skills across {len(categories)} categories (Base: {self.base_dir}).")
+
+    def build_compact_router_description(self):
+        """Build a minimal ~45-token frontmatter description when background hooks are active."""
+        return (
+            "Universal agent-agnostic skill router and tiered storage manager. "
+            "Background hooks automatically inject relevant vaulted skills on demand; "
+            "use MCP tools search_skills/load_skill for mid-turn lookups."
+        )
 
     def build_router_description(self):
         """Build a dynamic SKILL.md router description from the current archive manifest."""
@@ -1661,10 +1993,13 @@ class SkillVault:
 
     def _get_router_skill_md_candidates(self):
         """Locate candidate SKILL.md files belonging to skill-vault within base_dir."""
+        root_dir = self.get_root_dir()
         raw_candidates = [
             self.skills_dir / "skill-vault" / "SKILL.md",
             self.base_dir / ".agents" / "skills" / "skill-vault" / "SKILL.md",
             self.base_dir / ".claude" / "skills" / "skill-vault" / "SKILL.md",
+            self.base_dir / "plugins" / "skill-vault" / "skills" / "skill-vault" / "SKILL.md",
+            root_dir / "plugins" / "skill-vault" / "skills" / "skill-vault" / "SKILL.md",
         ]
         if self.archive_dir.exists():
             raw_candidates.append(self.base_dir / "SKILL.md")
@@ -1681,7 +2016,11 @@ class SkillVault:
     def sync_router_md(self, target_skill_md=None, force=False):
         """Synchronize skill-vault's SKILL.md frontmatter description with the active vault categories."""
         candidates = [Path(target_skill_md)] if target_skill_md else self._get_router_skill_md_candidates()
-        new_desc = self.build_router_description()
+        routing_cfg = self.load_config().get("routing", {})
+        if routing_cfg.get("compact_router_prompt"):
+            new_desc = self.build_compact_router_description()
+        else:
+            new_desc = self.build_router_description()
         new_desc_block = f"description: >-\n  {new_desc}"
         desc_pattern = re.compile(
             r"^description:\s*(?:>[-+]?|\|[-+]?)?\s*\n?.*?(?=\n[a-zA-Z0-9_-]+:|\Z)",
@@ -1715,6 +2054,20 @@ class SkillVault:
 
         return updated
 
+    @staticmethod
+    def _parse_routing_value(key, raw_val):
+        default = skill_router.DEFAULT_ROUTING_CONFIG.get(key)
+        val = str(raw_val).strip()
+        if isinstance(default, bool):
+            return val.lower() in {"1", "true", "yes", "on"}
+        if isinstance(default, int):
+            return int(val)
+        if isinstance(default, float):
+            return float(val)
+        if isinstance(default, list):
+            return [v.strip() for v in val.split(",") if v.strip()]
+        return val
+
     def manage_config(
         self,
         show=False,
@@ -1723,6 +2076,7 @@ class SkillVault:
         remove_core=None,
         add_fingerprint=None,
         add_category_rule=None,
+        set_routing=None,
         sync_prompt=False,
     ):
         """Inspect or update vault_config.json and dynamically synchronize the router prompt."""
@@ -1735,14 +2089,15 @@ class SkillVault:
 
         fp_pairs = _normalize_pairs(add_fingerprint)
         rule_pairs = _normalize_pairs(add_category_rule)
-        mutating = bool(init_config or add_core or remove_core or fp_pairs or rule_pairs)
+        routing_pairs = _normalize_pairs(set_routing)
+        mutating = bool(init_config or add_core or remove_core or fp_pairs or rule_pairs or routing_pairs)
 
         if init_config:
             effective = self.load_config()
             self.save_config(effective)
             print(f"[Config Initialized] Wrote vault configuration to: {self.config_file}")
 
-        if add_core or remove_core or fp_pairs or rule_pairs:
+        if add_core or remove_core or fp_pairs or rule_pairs or routing_pairs:
             raw_cfg = self._load_raw_config()
 
             if add_core:
@@ -1807,6 +2162,18 @@ class SkillVault:
                     print(f"[Config Updated] Added category rule: [{c}] <- '{k}'")
                 raw_cfg["category_rules"] = rule_map
 
+            if routing_pairs:
+                routing_map = dict(raw_cfg.get("routing", {}))
+                for r_key, r_val in routing_pairs:
+                    k = r_key.strip()
+                    if k not in skill_router.DEFAULT_ROUTING_CONFIG:
+                        print(f"[Warning] Unknown routing key '{k}'. Valid keys: {', '.join(sorted(skill_router.DEFAULT_ROUTING_CONFIG))}")
+                        continue
+                    parsed = self._parse_routing_value(k, r_val)
+                    routing_map[k] = parsed
+                    print(f"[Config Updated] Routing '{k}' = {parsed!r}")
+                raw_cfg["routing"] = routing_map
+
             self.save_config(raw_cfg)
 
         if sync_prompt:
@@ -1829,7 +2196,10 @@ class SkillVault:
             print("==================================================\n")
             print(f"Protected Core Skills ({len(effective['core_skills'])}):")
             print(f"  {', '.join(effective['core_skills'])}\n")
-            print(f"Workspace Fingerprint Categories ({len(effective['workspace_fingerprints'])}):")
+            print("Background JIT Routing Settings:")
+            for rk, rv in sorted(effective["routing"].items()):
+                print(f"  * {rk}: {rv!r}")
+            print(f"\nWorkspace Fingerprint Categories ({len(effective['workspace_fingerprints'])}):")
             for cat, pats in effective["workspace_fingerprints"].items():
                 print(f"  * {cat}: {len(pats)} pattern(s)")
             print(f"\nCategory Inference Rules ({len(effective['category_rules'])}):")
@@ -1944,32 +2314,635 @@ class SkillVault:
 
         return 0
 
-    def search(self, query):
-        """Search archived skills."""
-        q = query.lower()
-        manifest = self.load_manifest()
-        results = []
+    def search(self, query, category=None, limit=10, as_json=False):
+        """Search archived skills using pre-built BM25 index with substring fallback."""
+        index_data = skill_router.load_or_build_index(
+            archive_dir=self.archive_dir,
+            base_dir=self.base_dir,
+            resolve_path_fn=self.resolve_portable_path,
+        )
+        results = skill_router.search_index(
+            index_data=index_data,
+            query=query,
+            category=category,
+            limit=limit,
+        )
 
-        for item in manifest:
-            name = item["name"]
-            cat = item.get("category", "General & Utility Skills")
-            archived_path = self.resolve_portable_path(item["archived_path"])
-            skill_md = archived_path / "SKILL.md"
-            desc = self.parse_skill_description(skill_md)
+        # Fallback substring search when query is a partial fragment not captured by tokenization
+        if not results and query.strip():
+            q = query.strip().lower()
+            for item in self.load_manifest():
+                name = item["name"]
+                cat = item.get("category", "General & Utility Skills")
+                if category and cat.lower() != category.strip().lower():
+                    continue
+                archived_path = self.resolve_portable_path(item["archived_path"])
+                desc = self.parse_skill_description(archived_path / "SKILL.md")
+                if q in name.lower() or q in desc.lower() or q in cat.lower():
+                    results.append({
+                        "name": name,
+                        "category": cat,
+                        "score": 1.0,
+                        "description": desc,
+                        "resolved_path": str(archived_path),
+                    })
+            results = results[:limit]
 
-            if q in name.lower() or q in desc.lower() or q in cat.lower():
-                results.append((name, cat, desc, str(archived_path)))
+        if as_json:
+            print(json.dumps(results, indent=2, ensure_ascii=False))
+            return
 
         if not results:
             print(f"No archived skills matched '{query}'.")
             return
 
         print(f"Found {len(results)} matching skill(s):\n")
-        for name, cat, desc, path_str in results:
-            print(f"* {name} [{cat}]")
+        for r in results:
+            path_str = r.get("resolved_path") or str(self.resolve_portable_path(r.get("archived_path", "")))
+            desc = r.get("description", "")
+            print(f"* {r['name']} [{r['category']}] (score: {r['score']})")
             desc_snippet = desc[:130] + "..." if len(desc) > 130 else desc
             print(f"  Description: {desc_snippet}")
             print(f"  Path: {path_str}\n")
+
+    # --- JIT Router Debugging, Deduplication, Telemetry & Setup ---
+
+    def route(self, prompt, workspace_path=None, mode=None, as_json=False):
+        """Dry-run the JIT skill router against a prompt and inspect scores, tiers, and tokens."""
+        index_data = skill_router.load_or_build_index(
+            archive_dir=self.archive_dir,
+            base_dir=self.base_dir,
+            resolve_path_fn=self.resolve_portable_path,
+        )
+        cfg = dict(self.load_config().get("routing", {}))
+        if mode:
+            cfg["mode"] = mode
+
+        ws_cats = []
+        ws_target = Path(workspace_path).resolve() if workspace_path else Path.cwd().resolve()
+        if ws_target.exists():
+            ws_cats = sorted(self.detect_workspace_categories(ws_target).keys())
+
+        result = skill_router.route_prompt(
+            index_data=index_data,
+            prompt=prompt,
+            archive_dir=self.archive_dir,
+            base_dir=self.base_dir,
+            workspace_categories=ws_cats,
+            routing_config=cfg,
+        )
+
+        if as_json:
+            payload = {
+                "prompt": prompt,
+                "mode": cfg.get("mode", "hybrid"),
+                "workspace_categories": ws_cats,
+                "ambiguous": result["ambiguous"],
+                "estimated_tokens": result["estimated_tokens"],
+                "inline": [
+                    {
+                        "name": i["name"],
+                        "category": i["category"],
+                        "score": i["score"],
+                        "matched_terms": i.get("matched_terms", []),
+                        "truncated": i.get("truncated", False),
+                    }
+                    for i in result["inline"]
+                ],
+                "pointers": [
+                    {
+                        "name": p["name"],
+                        "category": p["category"],
+                        "score": p["score"],
+                        "matched_terms": p.get("matched_terms", []),
+                    }
+                    for p in result["pointers"]
+                ],
+                "top_candidates": [
+                    {
+                        "name": c["name"],
+                        "category": c["category"],
+                        "score": c["score"],
+                        "matched_terms": c.get("matched_terms", []),
+                    }
+                    for c in result.get("candidates", [])[:8]
+                ],
+            }
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return 0
+
+        print("==================================================")
+        print("            SKILL VAULT ROUTE DIAGNOSTIC")
+        print(f"  Prompt:    {prompt}")
+        print(f"  Mode:      {cfg.get('mode', 'hybrid')}")
+        print(f"  Workspace: {', '.join(ws_cats) if ws_cats else '(none detected)'}")
+        print(f"  Ambiguous: {result['ambiguous']}")
+        print(f"  Est Tokens:{result['estimated_tokens']}")
+        print("==================================================\n")
+
+        if result["inline"]:
+            print(f"INLINE ({len(result['inline'])}):")
+            for i in result["inline"]:
+                terms = ", ".join(i.get("matched_terms", []))
+                trunc = " [TRUNCATED]" if i.get("truncated") else ""
+                print(f"  * {i['name']} [{i['category']}] score={i['score']} terms=[{terms}]{trunc}")
+        else:
+            print("INLINE: (none)")
+
+        if result["pointers"]:
+            print(f"\nPOINTERS ({len(result['pointers'])}):")
+            for p in result["pointers"]:
+                terms = ", ".join(p.get("matched_terms", []))
+                print(f"  * {p['name']} [{p['category']}] score={p['score']} terms=[{terms}]")
+        else:
+            print("\nPOINTERS: (none)")
+
+        top_cands = result.get("candidates", [])[:8]
+        if top_cands:
+            print(f"\nTop Ranked Candidates:")
+            for c in top_cands:
+                terms = ", ".join(c.get("matched_terms", []))
+                print(f"  - {c['name']} [{c['category']}] score={c['score']} terms=[{terms}]")
+        print("")
+        return 0
+
+    def dedupe(self, dry_run=False):
+        """Consolidate hyphen/underscore duplicate skills in L2, preserving the newest version."""
+        manifest = self.load_manifest()
+        groups = {}
+        for item in manifest:
+            ckey = skill_router.canonicalize_skill_name(item.get("name", ""))
+            groups.setdefault(ckey, []).append(item)
+
+        dup_groups = {k: v for k, v in groups.items() if len(v) > 1}
+        print("==================================================")
+        print("           SKILL VAULT DUPLICATE CHECK")
+        print(f"  Total Manifest Entries: {len(manifest)}")
+        print(f"  Duplicate Groups Found: {len(dup_groups)}")
+        print("==================================================\n")
+
+        if not dup_groups:
+            print("[OK] No duplicate canonical skill names found in vault.")
+            return 0
+
+        to_remove = []
+        kept_entries = {}
+        for ckey, items in sorted(groups.items()):
+            if len(items) == 1:
+                kept_entries[items[0]["name"]] = items[0]
+                continue
+
+            winner = items[0]
+            winner_dir = self.resolve_portable_path(winner.get("archived_path", ""))
+            for cand in items[1:]:
+                cand_dir = self.resolve_portable_path(cand.get("archived_path", ""))
+                rec = compare_skill_recency(cand_dir, winner_dir)
+                cand_hyphen = "-" in cand["name"] and "_" not in cand["name"]
+                win_hyphen = "-" in winner["name"] and "_" not in winner["name"]
+                if rec > 0 or (rec == 0 and cand_hyphen and not win_hyphen) or (rec == 0 and cand_hyphen == win_hyphen and cand["name"] < winner["name"]):
+                    winner = cand
+                    winner_dir = cand_dir
+
+            kept_entries[winner["name"]] = winner
+            print(f"Group '{ckey}':")
+            print(f"  [KEEP]   {winner['name']} ({winner.get('category', 'General & Utility Skills')}) -> {winner_dir}")
+            for cand in items:
+                if cand["name"] != winner["name"]:
+                    cand_dir = self.resolve_portable_path(cand.get("archived_path", ""))
+                    print(f"  [REMOVE] {cand['name']} ({cand.get('category', 'General & Utility Skills')}) -> {cand_dir}")
+                    to_remove.append((cand, cand_dir, winner_dir))
+
+        if dry_run:
+            print(f"\n[Dry Run] Would consolidate {len(to_remove)} duplicate skill(s). No files were modified.")
+            return 0
+
+        for cand, cand_dir, winner_dir in to_remove:
+            if cand_dir.exists() and cand_dir.resolve() != winner_dir.resolve():
+                shutil.rmtree(cand_dir)
+                print(f"[Removed] {cand_dir}")
+
+        self.save_manifest(list(kept_entries.values()))
+        self.reindex()
+        print(f"\n[OK] Consolidated {len(to_remove)} duplicate skill(s).")
+        return 0
+
+    def stats(self, limit=100, as_json=False):
+        """Summarize local background routing telemetry from routing_log.jsonl."""
+        log_file = self.archive_dir / ".state" / "routing_log.jsonl"
+        records = []
+        if log_file.exists():
+            try:
+                lines = [ln for ln in log_file.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+                if limit and limit > 0:
+                    lines = lines[-limit:]
+                for ln in lines:
+                    try:
+                        records.append(json.loads(ln))
+                    except Exception:
+                        pass
+            except OSError:
+                pass
+
+        total = len(records)
+        short_circuited = sum(1 for r in records if r.get("short_circuited"))
+        zero_token = sum(1 for r in records if int(r.get("estimated_tokens", 0)) == 0)
+        matched = [r for r in records if int(r.get("estimated_tokens", 0)) > 0]
+        latencies = sorted(float(r.get("latency_ms", 0.0)) for r in records)
+        avg_latency = round(sum(latencies) / total, 2) if total else 0.0
+        p95_idx = min(len(latencies) - 1, int(len(latencies) * 0.95)) if latencies else 0
+        p95_latency = round(latencies[p95_idx], 2) if latencies else 0.0
+        avg_tokens_matched = round(sum(int(r.get("estimated_tokens", 0)) for r in matched) / len(matched), 1) if matched else 0.0
+        zero_pct = round((zero_token / total) * 100.0, 1) if total else 0.0
+
+        skill_counts = {}
+        for r in records:
+            for s in r.get("matched_inline", []) + r.get("matched_pointers", []):
+                skill_counts[s] = skill_counts.get(s, 0) + 1
+        top_skills = sorted(skill_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+
+        summary = {
+            "total_turns": total,
+            "short_circuited_turns": short_circuited,
+            "zero_token_turns": zero_token,
+            "zero_token_pct": zero_pct,
+            "matched_turns": len(matched),
+            "avg_tokens_per_matched_turn": avg_tokens_matched,
+            "avg_latency_ms": avg_latency,
+            "p95_latency_ms": p95_latency,
+            "top_skills": [{"name": k, "count": v} for k, v in top_skills],
+        }
+
+        if as_json:
+            print(json.dumps(summary, indent=2))
+            return 0
+
+        print("==================================================")
+        print("            SKILL VAULT ROUTING STATS")
+        print(f"  Log File: {log_file}")
+        print("==================================================\n")
+        if total == 0:
+            print("No routing telemetry recorded yet.")
+            return 0
+        print(f"  * Total Routed Turns:        {total} (short-circuited: {short_circuited})")
+        print(f"  * Zero-Token Turns:          {zero_token} ({zero_pct}%)")
+        print(f"  * Matched Turns:             {len(matched)} (avg ~{avg_tokens_matched} tokens)")
+        print(f"  * Latency (avg / p95):       {avg_latency} ms / {p95_latency} ms")
+        if top_skills:
+            print("\n  Top Matched Skills:")
+            for name, cnt in top_skills:
+                print(f"    - {name}: {cnt}")
+        print("")
+        return 0
+
+    def _merge_json_config_file(self, cfg_path, mutator_fn, dry_run=False):
+        cfg_path = Path(cfg_path)
+        existing = {}
+        if cfg_path.exists():
+            try:
+                existing = json.loads(cfg_path.read_text(encoding="utf-8", errors="replace"))
+                if not isinstance(existing, dict):
+                    existing = {}
+            except Exception:
+                existing = {}
+
+        updated = mutator_fn(json.loads(json.dumps(existing)))
+        if dry_run:
+            return updated
+
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        bak_path = cfg_path.with_suffix(cfg_path.suffix + ".bak")
+        if cfg_path.exists() and not bak_path.exists():
+            shutil.copy2(cfg_path, bak_path)
+        tmp = cfg_path.with_name(f".{cfg_path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(updated, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        os.replace(tmp, cfg_path)
+        return updated
+
+    @staticmethod
+    def _build_hook_command(py_exe, script_ref, harness, event_name, vault_base_dir):
+        """Build a cmd /c and sh -c safe command string avoiding Windows >2 quote stripping."""
+        py_str = str(py_exe)
+        base_str = str(vault_base_dir)
+        py_token = f'"{py_str}"' if (" " in py_str and not py_str.startswith('"')) else py_str
+        script_token = f'"{script_ref}"' if (" " in str(script_ref) and '"' not in py_token) else str(script_ref)
+        # Never introduce a second quoted pair on Windows cmd /c; vault_link.json carries baseDir when paths have spaces
+        if " " in base_str or '"' in py_token or '"' in script_token:
+            base_flag = ""
+        else:
+            base_flag = f" --base-dir {base_str}"
+        return f"{py_token} {script_token} --harness {harness} --event {event_name}{base_flag}"
+
+    def setup(
+        self,
+        agent="auto",
+        scope="global",
+        dry_run=False,
+        migrate_archive=False,
+        target_dir=None,
+        python_exe=None,
+    ):
+        """Install background hooks, read-only MCP server, and plugin bundle for coding agents."""
+        src_scripts_dir = Path(__file__).resolve().parent
+        required_scripts = ["skill_vault.py", "skill_router.py", "hook_runner.py", "mcp_server.py"]
+        for sname in required_scripts:
+            if not (src_scripts_dir / sname).exists():
+                print(f"[Error] Required script missing: {src_scripts_dir / sname}")
+                return 1
+
+        src_skill_md = None
+        for cand_md in [
+            src_scripts_dir.parent / "SKILL.md",
+            src_scripts_dir.parent / "skills" / "skill-vault" / "SKILL.md",
+        ]:
+            if cand_md.exists():
+                src_skill_md = cand_md
+                break
+
+        py = str(python_exe or sys.executable)
+        home = Path.home()
+        cwd = Path.cwd().resolve()
+
+        if agent == "auto":
+            agents = []
+            if scope == "workspace":
+                if (cwd / ".agents").exists():
+                    agents.append("antigravity")
+                if (cwd / ".claude").exists():
+                    agents.append("claude")
+                if (cwd / ".gemini").exists():
+                    agents.append("gemini-cli")
+                if (cwd / ".cursor").exists():
+                    agents.append("cursor")
+            else:
+                if (home / ".gemini" / "config").exists():
+                    agents.append("antigravity")
+                if (home / ".claude").exists():
+                    agents.append("claude")
+                if (home / ".gemini" / "settings.json").exists():
+                    agents.append("gemini-cli")
+                if (home / ".cursor").exists():
+                    agents.append("cursor")
+            if not agents:
+                agents = ["antigravity"]
+        else:
+            agents = [agent]
+
+        # Determine canonical vault base directory per scope and target agent
+        home_cfg = home / ".gemini" / "config"
+        legacy_sv = home_cfg / "skills" / "skill-vault"
+        legacy_arch = legacy_sv / "skill_archive"
+        canon_arch = home_cfg / "skill_archive"
+        primary_agent = agents[0]
+
+        if self._explicit_base_dir:
+            vault_base_dir = self.base_dir
+        elif scope == "workspace":
+            ws_existing = [
+                cwd / ".agents",
+                cwd / ".claude",
+                cwd / ".gemini",
+                cwd / ".cursor",
+                cwd,
+            ]
+            found_ws = next((c for c in ws_existing if (c / "skill_archive").exists()), None)
+            if found_ws is not None:
+                vault_base_dir = found_ws
+            elif primary_agent == "claude":
+                vault_base_dir = cwd / ".claude"
+            elif primary_agent == "gemini-cli":
+                vault_base_dir = cwd / ".gemini"
+            elif primary_agent == "cursor":
+                vault_base_dir = (cwd / ".agents") if (cwd / ".agents").exists() else (cwd / ".cursor")
+            else:
+                vault_base_dir = cwd / ".agents"
+        else:
+            if migrate_archive and legacy_arch.exists() and not canon_arch.exists():
+                vault_base_dir = home_cfg
+            else:
+                global_existing = [
+                    home_cfg,
+                    home / ".claude",
+                    home / ".agents",
+                    home / ".gemini",
+                    home / ".cursor",
+                    legacy_sv,
+                ]
+                found_global = next((c for c in global_existing if (c / "skill_archive").exists()), None)
+                if found_global is not None:
+                    vault_base_dir = found_global
+                elif primary_agent == "claude":
+                    vault_base_dir = home / ".claude"
+                elif primary_agent == "gemini-cli":
+                    vault_base_dir = home / ".gemini"
+                elif primary_agent == "cursor":
+                    vault_base_dir = home / ".cursor"
+                else:
+                    vault_base_dir = home_cfg
+
+        print("==================================================")
+        print("        SKILL VAULT ORCHESTRATION SETUP")
+        print(f"  Target Agent(s): {', '.join(agents)}")
+        print(f"  Scope:           {scope}")
+        print(f"  Vault Base:      {vault_base_dir}")
+        print(f"  Python Runtime:  {py}")
+        print("==================================================\n")
+
+        # Handle archive migration if requested
+        will_migrate = (
+            migrate_archive
+            and scope == "global"
+            and not self._explicit_base_dir
+            and legacy_arch.exists()
+            and not canon_arch.exists()
+        )
+        if will_migrate:
+            print(f"[Migration Plan] {legacy_arch} -> {canon_arch}")
+            print(f"                 Verify integrity before removing legacy {legacy_sv}\n")
+            if not dry_run:
+                src_count = len(SkillVault(base_dir=str(legacy_sv)).get_archived_skill_folders())
+                shutil.copytree(legacy_arch, canon_arch, dirs_exist_ok=True)
+                migrated_mgr = SkillVault(base_dir=str(home_cfg))
+                if migrated_mgr.verify(fix=False) != 0:
+                    print("[Error] Archive migration verification failed! Legacy archive preserved untouched.")
+                    return 1
+                dst_count = len(migrated_mgr.get_archived_skill_folders())
+                if dst_count < src_count:
+                    print(f"[Error] Migrated skill count ({dst_count}) < source ({src_count}). Legacy archive preserved untouched.")
+                    return 1
+                if legacy_sv.exists():
+                    shutil.rmtree(legacy_sv)
+                print(f"[Migrated] Verified {dst_count} skill(s) at {canon_arch} and removed legacy {legacy_sv}\n")
+
+        # Ensure vault archive exists
+        if not dry_run:
+            vault_base_dir.mkdir(parents=True, exist_ok=True)
+        vault_mgr = SkillVault(base_dir=str(vault_base_dir))
+        if not dry_run and not vault_mgr.archive_dir.exists():
+            vault_mgr.init()
+
+        for target_agent in agents:
+            if target_agent == "antigravity":
+                if target_dir:
+                    td = Path(target_dir).resolve()
+                    if td.name == "skill-vault":
+                        plugin_dir = td
+                    elif td.name == "plugins":
+                        plugin_dir = td / "skill-vault"
+                    else:
+                        plugin_dir = td / "plugins" / "skill-vault"
+                elif scope == "workspace":
+                    plugin_dir = cwd / ".agents" / "plugins" / "skill-vault"
+                else:
+                    plugin_dir = home_cfg / "plugins" / "skill-vault"
+
+                hooks_payload = {
+                    "skill-vault-session-sync": {
+                        "SessionStart": [
+                            {
+                                "type": "command",
+                                "command": self._build_hook_command(
+                                    py, "scripts/hook_runner.py", "antigravity", "SessionStart", vault_base_dir
+                                ),
+                                "timeout": 30,
+                            }
+                        ]
+                    },
+                    "skill-vault-jit-router": {
+                        "PreInvocation": [
+                            {
+                                "type": "command",
+                                "command": self._build_hook_command(
+                                    py, "scripts/hook_runner.py", "antigravity", "PreInvocation", vault_base_dir
+                                ),
+                                "timeout": 10,
+                            }
+                        ]
+                    },
+                }
+                mcp_payload = {
+                    "mcpServers": {
+                        "skill-vault": {
+                            "command": py,
+                            "type": "stdio",
+                            "args": ["scripts/mcp_server.py"],
+                            "env": {"SKILL_VAULT_BASE": str(vault_base_dir)},
+                        }
+                    }
+                }
+                plugin_meta = {
+                    "name": "skill-vault",
+                    "displayName": "Skill Vault",
+                    "version": "2.0.0",
+                    "description": "Automatic background skill router, cold-storage archive, and read-only JIT MCP server.",
+                    "author": "jcorpac",
+                    "license": "MIT",
+                }
+
+                print(f"[Antigravity Plugin] Target: {plugin_dir}")
+                if dry_run:
+                    print(f"  * Would install scripts: {', '.join(required_scripts)}")
+                    print("  * Would write plugin.json, hooks.json, mcp_config.json, vault_link.json, skills/skill-vault/SKILL.md")
+                else:
+                    scripts_dest = plugin_dir / "scripts"
+                    scripts_dest.mkdir(parents=True, exist_ok=True)
+                    for sname in required_scripts:
+                        shutil.copy2(src_scripts_dir / sname, scripts_dest / sname)
+
+                    if src_skill_md and src_skill_md.exists():
+                        dest_md_dir = plugin_dir / "skills" / "skill-vault"
+                        dest_md_dir.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src_skill_md, dest_md_dir / "SKILL.md")
+
+                    (plugin_dir / "plugin.json").write_text(json.dumps(plugin_meta, indent=2) + "\n", encoding="utf-8")
+                    (plugin_dir / "hooks.json").write_text(json.dumps(hooks_payload, indent=2) + "\n", encoding="utf-8")
+                    (plugin_dir / "mcp_config.json").write_text(json.dumps(mcp_payload, indent=2) + "\n", encoding="utf-8")
+                    (plugin_dir / "vault_link.json").write_text(json.dumps({"baseDir": str(vault_base_dir)}, indent=2) + "\n", encoding="utf-8")
+                    print(f"  [OK] Installed Antigravity plugin bundle to {plugin_dir}")
+
+            elif target_agent in ("claude", "gemini-cli", "cursor"):
+                # Stage permanent runtime scripts inside archive/.runtime so npx/temp paths never break
+                runtime_dir = vault_mgr.archive_dir / ".runtime" / "scripts"
+                hook_script = runtime_dir / "hook_runner.py"
+                mcp_script = runtime_dir / "mcp_server.py"
+                if not dry_run:
+                    runtime_dir.mkdir(parents=True, exist_ok=True)
+                    for sname in required_scripts:
+                        shutil.copy2(src_scripts_dir / sname, runtime_dir / sname)
+                    (runtime_dir.parent / "vault_link.json").write_text(
+                        json.dumps({"baseDir": str(vault_base_dir)}, indent=2) + "\n", encoding="utf-8"
+                    )
+
+                if target_agent == "claude":
+                    cfg_file = Path(target_dir).resolve() if target_dir else (
+                        (cwd / ".claude" / "settings.json") if scope == "workspace" else (home / ".claude" / "settings.json")
+                    )
+                    evt_name = "UserPromptSubmit"
+                elif target_agent == "gemini-cli":
+                    cfg_file = Path(target_dir).resolve() if target_dir else (
+                        (cwd / ".gemini" / "settings.json") if scope == "workspace" else (home / ".gemini" / "settings.json")
+                    )
+                    evt_name = "BeforeAgent"
+                else:
+                    cfg_file = Path(target_dir).resolve() if target_dir else (
+                        (cwd / ".cursor" / "mcp.json") if scope == "workspace" else (home / ".cursor" / "mcp.json")
+                    )
+                    evt_name = None
+
+                def _mutate(cfg):
+                    mcp_servers = cfg.setdefault("mcpServers", {})
+                    mcp_servers["skill-vault"] = {
+                        "command": py,
+                        "args": [str(mcp_script), "--base-dir", str(vault_base_dir)],
+                        "env": {"SKILL_VAULT_BASE": str(vault_base_dir)},
+                    }
+                    if evt_name:
+                        hooks = cfg.setdefault("hooks", {})
+                        for hook_ev in ("SessionStart", evt_name):
+                            groups = [
+                                g for g in hooks.get(hook_ev, [])
+                                if not any(
+                                    "hook_runner.py" in str(h.get("command", "")) or "skill-vault" in str(h.get("command", ""))
+                                    for h in (g.get("hooks", []) if isinstance(g, dict) else [])
+                                )
+                            ]
+                            groups.append({
+                                "matcher": "",
+                                "hooks": [{
+                                    "type": "command",
+                                    "command": self._build_hook_command(
+                                        py, str(hook_script), target_agent, hook_ev, vault_base_dir
+                                    ),
+                                }],
+                            })
+                            hooks[hook_ev] = groups
+                    return cfg
+
+                print(f"[{target_agent}] Config: {cfg_file}")
+                self._merge_json_config_file(cfg_file, _mutate, dry_run=dry_run)
+                if dry_run:
+                    print(f"  * Would merge hooks/MCP into {cfg_file}")
+                else:
+                    print(f"  [OK] Updated {cfg_file}")
+            else:
+                print(f"[Error] Unsupported agent '{target_agent}'.")
+                return 1
+
+        if dry_run:
+            print("\n[Dry Run] Setup preview complete. No files were modified.")
+            return 0
+
+        # Enable compact router prompt & rebuild search_index.json
+        raw_cfg = vault_mgr._load_raw_config()
+        routing_map = dict(raw_cfg.get("routing", {}))
+        routing_map["compact_router_prompt"] = True
+        raw_cfg["routing"] = routing_map
+        vault_mgr.save_config(raw_cfg)
+        vault_mgr.reindex()
+        if "antigravity" in agents:
+            vault_mgr.sync_router_md(target_skill_md=plugin_dir / "skills" / "skill-vault" / "SKILL.md", force=True)
+
+        print("\n[OK] Skill Vault background orchestration is configured and ready.")
+        return 0
 
     # --- Project Import Engine ---
 
@@ -2001,13 +2974,15 @@ class SkillVault:
         ):
             return self.archive_dir
 
-        # Check standard global locations
+        # Check standard global locations (canonical ~/.gemini/config/skill_archive first)
         candidates = [
+            Path.home() / ".gemini" / "config" / "skill_archive",
             Path.home() / ".gemini" / "config" / "skills" / "skill-vault" / "skill_archive",
             Path.home() / ".gemini" / "config" / "skills" / ".skill_archive",
-            Path.home() / ".gemini" / "config" / "skill_archive",
             Path.home() / ".agents" / "skill_archive",
             Path.home() / ".claude" / "skill_archive",
+            Path.home() / ".gemini" / "skill_archive",
+            Path.home() / ".cursor" / "skill_archive",
         ]
         for cand in candidates:
             if cand.exists() and (
@@ -2228,9 +3203,11 @@ def main():
     p_arch.add_argument("--force", action="store_true", help="Force overwrite in archive regardless of recency")
 
     # Recategorize
-    p_rec = subparsers.add_parser("recategorize", help="Recategorize an archived skill in metadata")
-    p_rec.add_argument("name", help="Skill name")
-    p_rec.add_argument("category", help="New category name")
+    p_rec = subparsers.add_parser("recategorize", help="Recategorize an archived skill in metadata or auto-recategorize General skills")
+    p_rec.add_argument("name", nargs="?", help="Skill name")
+    p_rec.add_argument("category", nargs="?", help="New category name")
+    p_rec.add_argument("--auto", action="store_true", help="Auto-recategorize skills in 'General & Utility Skills'")
+    p_rec.add_argument("--dry-run", action="store_true", help="Preview auto-recategorization without modifying manifest")
 
     # Restore
     p_rest = subparsers.add_parser("restore", help="Restore archived skills back to active availability")
@@ -2241,7 +3218,7 @@ def main():
     p_rest.add_argument("--force", action="store_true", help="Overwrite existing active directory")
 
     # Reindex
-    p_idx = subparsers.add_parser("reindex", help="Rebuild INDEX.md and sync manifest")
+    p_idx = subparsers.add_parser("reindex", help="Rebuild INDEX.md, search_index.json, and sync manifest")
 
     # Verify / Integrity Check
     p_ver = subparsers.add_parser("verify", help="Verify archive integrity across disk, manifest, and index")
@@ -2249,7 +3226,48 @@ def main():
 
     # Search
     p_srch = subparsers.add_parser("search", help="Search archived skills by keyword, intent, or domain")
-    p_srch.add_argument("query", help="Keyword to search for")
+    p_srch.add_argument("query", help="Keyword or natural-language query to search for")
+    p_srch.add_argument("--category", help="Filter search results by category")
+    p_srch.add_argument("--limit", type=int, default=10, help="Maximum number of results to show")
+    p_srch.add_argument("--json", action="store_true", help="Output structured JSON")
+
+    # Route (dry-run JIT router debugger)
+    p_route = subparsers.add_parser("route", help="Dry-run the background JIT skill router against a prompt")
+    p_route.add_argument("prompt", help="User prompt to evaluate")
+    p_route.add_argument("--workspace", help="Optional workspace path for soft stack tie-breaking")
+    p_route.add_argument("--mode", choices=["hybrid", "inline", "pointer"], help="Override routing mode")
+    p_route.add_argument("--json", action="store_true", help="Output structured JSON")
+
+    # Dedupe
+    p_dedupe = subparsers.add_parser("dedupe", help="Consolidate hyphen/underscore duplicate skills in archive")
+    p_dedupe.add_argument("--dry-run", action="store_true", help="Preview duplicates without deleting files")
+
+    # Stats
+    p_stats = subparsers.add_parser("stats", help="Show local background routing telemetry summary")
+    p_stats.add_argument("--limit", type=int, default=100, help="Inspect most recent N turns")
+    p_stats.add_argument("--json", action="store_true", help="Output structured JSON")
+
+    # Setup
+    p_setup = subparsers.add_parser("setup", help="Install background hooks, MCP server, and plugin wiring")
+    p_setup.add_argument(
+        "--agent",
+        choices=["auto", "antigravity", "claude", "gemini-cli", "cursor"],
+        default="auto",
+        help="Target agent harness (default: auto)",
+    )
+    p_setup.add_argument(
+        "--scope",
+        choices=["global", "workspace"],
+        default="global",
+        help="Install globally or inside current workspace",
+    )
+    p_setup.add_argument("--dry-run", action="store_true", help="Preview installation plan without modifying files")
+    p_setup.add_argument(
+        "--migrate-archive",
+        action="store_true",
+        help="Safely migrate legacy ~/.gemini/config/skills/skill-vault/skill_archive to ~/.gemini/config/skill_archive",
+    )
+    p_setup.add_argument("--target-dir", help="Explicit target plugin directory or config file path")
 
     # Sync
     p_sync = subparsers.add_parser("sync", help="Scan plugins and active skills, ingest new/updated skills, and prune non-core skills")
@@ -2277,6 +3295,7 @@ def main():
     p_cfg.add_argument("--remove-core", nargs="+", metavar="SKILL", help="Remove one or more skills from protected core skills")
     p_cfg.add_argument("--add-fingerprint", nargs=2, action="append", metavar=("CATEGORY", "PATTERN"), help="Add a workspace file/glob fingerprint for a category")
     p_cfg.add_argument("--add-category-rule", nargs=2, action="append", metavar=("CATEGORY", "KEYWORD"), help="Add an inference keyword rule for a category")
+    p_cfg.add_argument("--set-routing", nargs=2, action="append", metavar=("KEY", "VALUE"), help="Set a routing configuration option (e.g. mode hybrid)")
     p_cfg.add_argument("--sync-prompt", action="store_true", help="Synchronize SKILL.md router description with archived categories")
 
     # Uninstall / Eject
@@ -2326,7 +3345,7 @@ def main():
     elif args.command == "archive":
         mgr.archive(name=args.name, pattern=args.pattern, category=args.category, keep_active=args.keep_active, force=args.force)
     elif args.command == "recategorize":
-        mgr.recategorize(name=args.name, new_category=args.category)
+        sys.exit(mgr.recategorize(name=args.name, new_category=args.category, auto=args.auto, dry_run=args.dry_run))
     elif args.command == "restore":
         mgr.restore(name=args.name, pattern=args.pattern, category=args.category, restore_all=args.all, force=args.force)
     elif args.command == "reindex":
@@ -2334,7 +3353,23 @@ def main():
     elif args.command == "verify":
         sys.exit(mgr.verify(fix=args.fix))
     elif args.command == "search":
-        mgr.search(query=args.query)
+        mgr.search(query=args.query, category=args.category, limit=args.limit, as_json=args.json)
+    elif args.command == "route":
+        sys.exit(mgr.route(prompt=args.prompt, workspace_path=args.workspace, mode=args.mode, as_json=args.json))
+    elif args.command == "dedupe":
+        sys.exit(mgr.dedupe(dry_run=args.dry_run))
+    elif args.command == "stats":
+        sys.exit(mgr.stats(limit=args.limit, as_json=args.json))
+    elif args.command == "setup":
+        sys.exit(
+            mgr.setup(
+                agent=args.agent,
+                scope=args.scope,
+                dry_run=args.dry_run,
+                migrate_archive=args.migrate_archive,
+                target_dir=args.target_dir,
+            )
+        )
     elif args.command == "import":
         sys.exit(
             mgr.import_skills(
@@ -2356,6 +3391,7 @@ def main():
             remove_core=args.remove_core,
             add_fingerprint=args.add_fingerprint,
             add_category_rule=args.add_category_rule,
+            set_routing=args.set_routing,
             sync_prompt=args.sync_prompt,
         )
     elif args.command in ("uninstall", "eject"):

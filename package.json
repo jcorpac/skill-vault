@@ -1,7 +1,7 @@
 {
   "name": "@jcorpac/skill-vault",
-  "version": "1.8.0",
-  "description": "Universal Agent Skill Router, Lifecycle Manager, and Tiered Storage Engine for AI Coding Agents.",
+  "version": "2.0.0",
+  "description": "Automatic Background Skill Router, Lifecycle Manager & Tiered Storage Engine for AI Coding Agents.",
   "main": "bin/cli.js",
   "bin": {
     "skill-vault": "bin/cli.js",
@@ -9,7 +9,10 @@
   },
   "files": [
     "bin/",
-    "scripts/skill_vault.py",
+    "scripts/*.py",
+    "plugin.json",
+    "hooks.json",
+    "mcp_config.json",
     "SKILL.md",
     "README.md",
     "LICENSE"
@@ -23,9 +26,11 @@
     "ai-agents",
     "antigravity",
     "claude-code",
+    "gemini-cli",
     "cursor",
     "skill-router",
     "skill-vault",
+    "mcp",
     "context-optimization",
     "llm-tools"
   ],
