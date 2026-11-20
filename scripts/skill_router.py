@@ -120,6 +120,7 @@ STOPWORDS = {
 SHORT_DOMAIN_TOKENS = {
     "ai", "ml", "db", "ui", "ux", "ci", "cd", "qa", "tf", "go",
     "ik", "js", "ts", "py", "bq", "vm", "os", "io", "ip", "pr",
+    "uv",
 }
 
 # Broad tech terms that should not trigger skill injection on their own as a solo 1-token query
@@ -221,8 +222,10 @@ def tokenize(text, include_stems=True):
 
 
 def canonicalize_skill_name(name):
-    """Return canonical deduplication key normalizing case and underscore/hyphen differences."""
-    return str(name or "").strip().lower().replace("_", "-")
+    """Return canonical deduplication key normalizing case and separator differences (-, _, ., spaces)."""
+    raw = str(name or "").strip().lower()
+    alnum = re.sub(r"[^a-z0-9]+", "", raw)
+    return alnum or raw
 
 
 def _parse_version_tuple(ver_str):
@@ -231,6 +234,22 @@ def _parse_version_tuple(ver_str):
     cleaned = str(ver_str).strip().strip("'\"").lstrip("vV")
     nums = re.findall(r"\d+", cleaned)
     return tuple(int(n) for n in nums) if nums else None
+
+
+def _compare_version_tuples(ver_a, ver_b):
+    """Compare two version tuples with zero-padding. Returns 1, -1, or 0."""
+    if ver_a is None or ver_b is None:
+        return 0
+    ta = tuple(ver_a)
+    tb = tuple(ver_b)
+    max_len = max(len(ta), len(tb))
+    pa = ta + (0,) * (max_len - len(ta))
+    pb = tb + (0,) * (max_len - len(tb))
+    if pa > pb:
+        return 1
+    if pa < pb:
+        return -1
+    return 0
 
 
 def _parse_frontmatter(content):
@@ -246,6 +265,8 @@ def _parse_frontmatter(content):
     # Scalar fields
     for field in ("name", "version", "category"):
         m = re.search(rf"^{field}:\s*([^\n]+)", fm_text, re.MULTILINE | re.IGNORECASE)
+        if not m and field == "version":
+            m = re.search(r"^[ \t]+version:\s*([^\n]+)", fm_text, re.MULTILINE | re.IGNORECASE)
         if m:
             val = m.group(1).strip().strip("'\"")
             if val:
@@ -414,24 +435,25 @@ def _is_newer_entry(cand, existing):
     """Return True if cand entry is strictly newer/preferred over existing entry."""
     va = cand.get("version_tuple")
     vb = existing.get("version_tuple")
-    if va is not None and vb is not None and va != vb:
-        return tuple(va) > tuple(vb)
-    if va is not None and vb is None:
-        return True
-    if va is None and vb is not None:
-        return False
+    if va is not None and vb is not None:
+        vcmp = _compare_version_tuples(va, vb)
+        if vcmp != 0:
+            return vcmp > 0
 
     ma = cand.get("mtime", 0.0)
     mb = existing.get("mtime", 0.0)
     if abs(ma - mb) > 1.0:
         return ma > mb
 
+    if (va is not None) != (vb is not None):
+        return va is not None
+
     # Tie-breaker: prefer hyphenated names over underscored names
     cand_hyphen = "-" in cand["name"] and "_" not in cand["name"]
     exist_hyphen = "-" in existing["name"] and "_" not in existing["name"]
     if cand_hyphen != exist_hyphen:
         return cand_hyphen
-    return cand["name"] < existing["name"]
+    return cand["name"].lower() < existing["name"].lower()
 
 
 def _resolve_archived_skill_dir(base_dir, archive_dir, raw_archived_path):
@@ -548,7 +570,11 @@ def load_or_build_index(archive_dir, base_dir=None, resolve_path_fn=None):
                 data = json.load(f)
             if (
                 isinstance(data, dict)
-                and data.get("schema_version") == INDEX_SCHEMA_VERSION
+                and isinstance(data.get("schema_version"), int)
+                and data.get("schema_version") >= INDEX_SCHEMA_VERSION
+                and isinstance(data.get("skills"), list)
+                and isinstance(data.get("df"), dict)
+                and isinstance(data.get("avg_len"), dict)
                 and float(data.get("manifest_mtime", 0.0)) >= manifest_mtime - 0.5
             ):
                 return data
@@ -608,7 +634,7 @@ def search_index(
     # Extract distinct semantic concepts without summing base + stem duplicates
     concept_tokens = list(dict.fromkeys(tokenize(query, include_stems=False)))
 
-    if not concept_tokens and not category:
+    if not raw_query and not category:
         return []
 
     specific_concepts = [
@@ -629,7 +655,7 @@ def search_index(
         if category and entry_cat.lower() != category.strip().lower():
             continue
 
-        if not concept_tokens and category:
+        if not raw_query and category:
             results.append({
                 "name": entry["name"],
                 "canonical_key": ckey,
@@ -736,15 +762,17 @@ def search_index(
         for alias in entry.get("aliases", [entry["name"]]):
             alias_l = alias.lower()
             alias_spaces = re.sub(r"[-_]+", " ", alias_l)
-            if (
-                len(alias_l) >= 4
-                and (
+            if len(alias_l) >= 4:
+                if (
                     re.search(rf"(?<![a-z0-9]){re.escape(alias_l)}(?![a-z0-9])", raw_query)
                     or re.search(rf"(?<![a-z0-9]){re.escape(alias_spaces)}(?![a-z0-9])", raw_query_norm)
-                )
-            ):
-                exact_name_hit = True
-                break
+                ):
+                    exact_name_hit = True
+                    break
+            elif len(alias_l) >= 2 and alias_l not in STOPWORDS:
+                if raw_query == alias_l or raw_query_norm == alias_spaces:
+                    exact_name_hit = True
+                    break
 
         if exact_name_hit:
             bm25_score += 10.0

@@ -7,6 +7,7 @@ strictly in backup_manifest.json and INDEX.md, keeping SKILL.md files pure and u
 """
 
 import argparse
+from datetime import datetime
 import fnmatch
 import hashlib
 import json
@@ -387,6 +388,22 @@ def parse_version_tuple(ver_str):
     return None
 
 
+def compare_version_tuples(ver_a, ver_b):
+    """Compare two version tuples with zero-padding. Returns 1, -1, or 0."""
+    if ver_a is None or ver_b is None:
+        return 0
+    ta = tuple(ver_a)
+    tb = tuple(ver_b)
+    max_len = max(len(ta), len(tb))
+    pa = ta + (0,) * (max_len - len(ta))
+    pb = tb + (0,) * (max_len - len(tb))
+    if pa > pb:
+        return 1
+    if pa < pb:
+        return -1
+    return 0
+
+
 def get_skill_metadata(skill_dir):
     """Extract parsed version and latest modification timestamp for a skill directory."""
     skill_dir = Path(skill_dir)
@@ -396,9 +413,12 @@ def get_skill_metadata(skill_dir):
     if skill_md.exists():
         try:
             content = skill_md.read_text(encoding="utf-8", errors="ignore")
-            fm_match = re.search(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+            fm_match = re.match(r"^---\s*\n(.*?)\n---(?:\s*\n|\s*\Z)", content, re.DOTALL)
             if fm_match:
-                v_match = re.search(r"version:\s*([^\n]+)", fm_match.group(1), re.IGNORECASE)
+                fm_text = fm_match.group(1)
+                v_match = re.search(r"^version:\s*([^\n]+)", fm_text, re.MULTILINE | re.IGNORECASE)
+                if not v_match:
+                    v_match = re.search(r"^[ \t]+version:\s*([^\n]+)", fm_text, re.MULTILINE | re.IGNORECASE)
                 if v_match:
                     ver_tuple = parse_version_tuple(v_match.group(1))
         except Exception:
@@ -432,16 +452,27 @@ def compare_skill_recency(dir_a, dir_b):
       -1 if dir_b is newer than dir_a
        0 if they are equivalent in version and recency
     """
+    a_exists = (Path(dir_a) / "SKILL.md").exists()
+    b_exists = (Path(dir_b) / "SKILL.md").exists()
+    if a_exists != b_exists:
+        return 1 if a_exists else -1
+
     ver_a, mtime_a = get_skill_metadata(dir_a)
     ver_b, mtime_b = get_skill_metadata(dir_b)
 
     # 1. Compare semantic/numeric versions if both exist and differ
-    if ver_a is not None and ver_b is not None and ver_a != ver_b:
-        return 1 if ver_a > ver_b else -1
+    if ver_a is not None and ver_b is not None:
+        vcmp = compare_version_tuples(ver_a, ver_b)
+        if vcmp != 0:
+            return vcmp
 
     # 2. Compare file modification timestamps (allowing a 1-second margin for filesystem granularity)
     if abs(mtime_a - mtime_b) > 1.0:
         return 1 if mtime_a > mtime_b else -1
+
+    # 3. Tie-breaker when timestamps match: prefer an explicitly versioned skill
+    if (ver_a is not None) != (ver_b is not None):
+        return 1 if ver_a is not None else -1
 
     return 0
 
@@ -1956,7 +1987,7 @@ class SkillVault:
         return (
             "Universal agent-agnostic skill router and tiered storage manager. "
             "Background hooks automatically inject relevant vaulted skills on demand; "
-            "use MCP tools search_skills/load_skill for mid-turn lookups."
+            "use MCP tools list_skills/search_skills/load_skill for mid-turn lookups."
         )
 
     def build_router_description(self):
@@ -2466,51 +2497,174 @@ class SkillVault:
         print("")
         return 0
 
-    def dedupe(self, dry_run=False):
-        """Consolidate hyphen/underscore duplicate skills in L2, preserving the newest version."""
-        manifest = self.load_manifest()
-        groups = {}
-        for item in manifest:
-            ckey = skill_router.canonicalize_skill_name(item.get("name", ""))
-            groups.setdefault(ckey, []).append(item)
+    @staticmethod
+    def _inspect_dedupe_entry(idx, item, dir_path):
+        """Extract canonical name, frontmatter alias, content hash, and recency metadata for dedupe."""
+        canon_name = skill_router.canonicalize_skill_name(item.get("name", ""))
+        fm_canon_name = None
+        content_hash = None
+        size_bytes = 0
+        skill_md = dir_path / "SKILL.md"
+        if skill_md.exists():
+            try:
+                raw_bytes = skill_md.read_bytes()
+                size_bytes = len(raw_bytes)
+                if size_bytes >= 64:
+                    content_hash = hashlib.sha256(raw_bytes).hexdigest()
+                content = raw_bytes.decode("utf-8", errors="ignore")
+                fm_match = re.match(r"^---\s*\n(.*?)\n---(?:\s*\n|\s*\Z)", content, re.DOTALL)
+                if fm_match:
+                    n_match = re.search(r"^name:\s*([^\n]+)", fm_match.group(1), re.MULTILINE | re.IGNORECASE)
+                    if n_match:
+                        fm_raw = n_match.group(1).strip().strip("'\"")
+                        if fm_raw:
+                            fm_canon_name = skill_router.canonicalize_skill_name(fm_raw) or None
+            except OSError:
+                pass
+        ver_tuple, mtime = get_skill_metadata(dir_path)
+        return {
+            "idx": idx,
+            "item": item,
+            "dir_path": dir_path,
+            "canon_name": canon_name,
+            "fm_canon_name": fm_canon_name,
+            "content_hash": content_hash,
+            "size_bytes": size_bytes,
+            "ver_tuple": ver_tuple,
+            "mtime": mtime,
+        }
 
-        dup_groups = {k: v for k, v in groups.items() if len(v) > 1}
+    @staticmethod
+    def _dedupe_candidate_beats(cand_info, win_info):
+        """Return True if cand_info is newer or preferred over win_info."""
+        rec = compare_skill_recency(cand_info["dir_path"], win_info["dir_path"])
+        if rec != 0:
+            return rec > 0
+        cand_name = cand_info["item"]["name"]
+        win_name = win_info["item"]["name"]
+        cand_hyphen = "-" in cand_name and "_" not in cand_name
+        win_hyphen = "-" in win_name and "_" not in win_name
+        if cand_hyphen != win_hyphen:
+            return cand_hyphen
+        if cand_info["size_bytes"] != win_info["size_bytes"]:
+            return cand_info["size_bytes"] > win_info["size_bytes"]
+        return cand_name.lower() < win_name.lower()
+
+    @staticmethod
+    def _format_dedupe_meta(info):
+        ver_str = ".".join(map(str, info["ver_tuple"])) if info["ver_tuple"] is not None else "none"
+        mtime_str = (
+            datetime.fromtimestamp(info["mtime"]).strftime("%Y-%m-%d %H:%M")
+            if info["mtime"] > 0
+            else "unknown"
+        )
+        return f"[ver={ver_str}, mtime={mtime_str}]"
+
+    def dedupe(self, dry_run=False):
+        """Consolidate duplicate skills in L2 (canonical name, frontmatter name, or identical content), keeping the newest version."""
+        manifest = self.load_manifest()
+        infos = [
+            self._inspect_dedupe_entry(i, item, self.resolve_portable_path(item.get("archived_path", "")))
+            for i, item in enumerate(manifest)
+        ]
+
+        # Union-Find over manifest entries sharing canonical name, frontmatter name, or SKILL.md SHA-256
+        parent = list(range(len(infos)))
+
+        def _find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def _union(a, b):
+            ra, rb = _find(a), _find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        buckets = {}
+        for info in infos:
+            idx = info["idx"]
+            keys = []
+            if info["canon_name"]:
+                keys.append(("name", info["canon_name"]))
+            if info["fm_canon_name"]:
+                keys.append(("name", info["fm_canon_name"]))
+            if info["content_hash"]:
+                keys.append(("sha256", info["content_hash"]))
+            for key in keys:
+                buckets.setdefault(key, []).append(idx)
+
+        for key_indices in buckets.values():
+            if len(key_indices) > 1:
+                head = key_indices[0]
+                for other in key_indices[1:]:
+                    _union(head, other)
+
+        components = {}
+        for info in infos:
+            components.setdefault(_find(info["idx"]), []).append(info)
+
+        dup_components = [grp for grp in components.values() if len(grp) > 1]
         print("==================================================")
         print("           SKILL VAULT DUPLICATE CHECK")
         print(f"  Total Manifest Entries: {len(manifest)}")
-        print(f"  Duplicate Groups Found: {len(dup_groups)}")
+        print(f"  Duplicate Groups Found: {len(dup_components)}")
         print("==================================================\n")
 
-        if not dup_groups:
-            print("[OK] No duplicate canonical skill names found in vault.")
+        if not dup_components:
+            print("[OK] No duplicate skills found in vault.")
             return 0
 
         to_remove = []
-        kept_entries = {}
-        for ckey, items in sorted(groups.items()):
-            if len(items) == 1:
-                kept_entries[items[0]["name"]] = items[0]
+        kept_entries = []
+        prepared_groups = []
+        for grp in components.values():
+            if len(grp) == 1:
+                kept_entries.append(grp[0]["item"])
                 continue
 
-            winner = items[0]
-            winner_dir = self.resolve_portable_path(winner.get("archived_path", ""))
-            for cand in items[1:]:
-                cand_dir = self.resolve_portable_path(cand.get("archived_path", ""))
-                rec = compare_skill_recency(cand_dir, winner_dir)
-                cand_hyphen = "-" in cand["name"] and "_" not in cand["name"]
-                win_hyphen = "-" in winner["name"] and "_" not in winner["name"]
-                if rec > 0 or (rec == 0 and cand_hyphen and not win_hyphen) or (rec == 0 and cand_hyphen == win_hyphen and cand["name"] < winner["name"]):
-                    winner = cand
-                    winner_dir = cand_dir
+            win_info = grp[0]
+            for cand_info in grp[1:]:
+                if self._dedupe_candidate_beats(cand_info, win_info):
+                    win_info = cand_info
+            kept_entries.append(win_info["item"])
 
-            kept_entries[winner["name"]] = winner
-            print(f"Group '{ckey}':")
-            print(f"  [KEEP]   {winner['name']} ({winner.get('category', 'General & Utility Skills')}) -> {winner_dir}")
-            for cand in items:
-                if cand["name"] != winner["name"]:
-                    cand_dir = self.resolve_portable_path(cand.get("archived_path", ""))
-                    print(f"  [REMOVE] {cand['name']} ({cand.get('category', 'General & Utility Skills')}) -> {cand_dir}")
-                    to_remove.append((cand, cand_dir, winner_dir))
+            reasons = set()
+            for i in range(len(grp)):
+                for j in range(i + 1, len(grp)):
+                    a, b = grp[i], grp[j]
+                    if a["canon_name"] and a["canon_name"] == b["canon_name"]:
+                        reasons.add("canonical-name")
+                    else:
+                        a_names = {n for n in (a["canon_name"], a["fm_canon_name"]) if n}
+                        b_names = {n for n in (b["canon_name"], b["fm_canon_name"]) if n}
+                        if a_names & b_names:
+                            reasons.add("frontmatter-name")
+                    if a["content_hash"] and a["content_hash"] == b["content_hash"]:
+                        reasons.add("identical-content")
+
+            group_label = win_info["canon_name"] or win_info["item"]["name"]
+            losers = [c for c in grp if c["idx"] != win_info["idx"]]
+            losers.sort(key=lambda c: c["item"]["name"].lower())
+            prepared_groups.append((group_label, sorted(reasons), win_info, losers))
+
+        prepared_groups.sort(key=lambda g: g[0].lower())
+        for group_label, reasons, win_info, losers in prepared_groups:
+            reasons_str = ", ".join(reasons) if reasons else "canonical-name"
+            print(f"Group '{group_label}' (matched by: {reasons_str}):")
+            win_item = win_info["item"]
+            print(
+                f"  [KEEP]   {win_item['name']} ({win_item.get('category', 'General & Utility Skills')}) "
+                f"{self._format_dedupe_meta(win_info)} -> {win_info['dir_path']}"
+            )
+            for cand_info in losers:
+                cand_item = cand_info["item"]
+                print(
+                    f"  [REMOVE] {cand_item['name']} ({cand_item.get('category', 'General & Utility Skills')}) "
+                    f"{self._format_dedupe_meta(cand_info)} -> {cand_info['dir_path']}"
+                )
+                to_remove.append((cand_item, cand_info["dir_path"], win_info["dir_path"]))
 
         if dry_run:
             print(f"\n[Dry Run] Would consolidate {len(to_remove)} duplicate skill(s). No files were modified.")
@@ -2521,7 +2675,7 @@ class SkillVault:
                 shutil.rmtree(cand_dir)
                 print(f"[Removed] {cand_dir}")
 
-        self.save_manifest(list(kept_entries.values()))
+        self.save_manifest(kept_entries)
         self.reindex()
         print(f"\n[OK] Consolidated {len(to_remove)} duplicate skill(s).")
         return 0
@@ -3239,7 +3393,10 @@ def main():
     p_route.add_argument("--json", action="store_true", help="Output structured JSON")
 
     # Dedupe
-    p_dedupe = subparsers.add_parser("dedupe", help="Consolidate hyphen/underscore duplicate skills in archive")
+    p_dedupe = subparsers.add_parser(
+        "dedupe",
+        help="Consolidate duplicate skills in archive (canonical name, frontmatter name, or identical content), keeping the newest version",
+    )
     p_dedupe.add_argument("--dry-run", action="store_true", help="Preview duplicates without deleting files")
 
     # Stats

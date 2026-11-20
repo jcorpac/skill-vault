@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Skill Vault Read-Only MCP Stdio Server.
 
-Provides two read-only fallback tools (`search_skills`, `load_skill`) over JSON-RPC 2.0
-(supporting both newline-delimited JSON and Content-Length framing) so coding agents can
-look up cold-storage skills mid-turn without shell approvals or L1 mutations.
+Provides three read-only fallback tools (`search_skills`, `list_skills`, `load_skill`) over
+JSON-RPC 2.0 (supporting both newline-delimited JSON and Content-Length framing) so coding
+agents can discover and inspect cold-storage skills mid-turn without shell approvals or L1 mutations.
 """
 
 import argparse
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -27,7 +28,7 @@ TOOLS_SPEC = [
         "name": "search_skills",
         "description": (
             "Search vaulted cold-storage skills by keyword, intent, or category. "
-            "Pass an empty query to list all available skill categories and counts."
+            "Pass an empty query to list categories and counts, or use list_skills to list all skill names in one call."
         ),
         "inputSchema": {
             "type": "object",
@@ -45,8 +46,43 @@ TOOLS_SPEC = [
                     "description": "Maximum results to return (default 8, max 25).",
                     "default": 8,
                 },
+                "offset": {
+                    "type": "integer",
+                    "description": "Pagination offset into sorted results (default 0).",
+                    "default": 0,
+                },
             },
             "required": ["query"],
+        },
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "list_skills",
+        "description": (
+            "List all vaulted cold-storage skill names grouped by category in a single compact call "
+            "(no 25-item limit). Optionally filter by category or include short 1-line descriptions."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "description": "Optional category name filter (case-insensitive).",
+                },
+                "include_descriptions": {
+                    "type": "boolean",
+                    "description": (
+                        "Include truncated 1-line descriptions per skill "
+                        "(default false for compact names-only output)."
+                    ),
+                    "default": False,
+                },
+            },
         },
         "annotations": {
             "readOnlyHint": True,
@@ -148,10 +184,40 @@ def _resolve_base_and_archive(cli_base=None):
     return fallback, fallback / "skill_archive"
 
 
+_INDEX_CACHE = {}
+
+
+def _file_sig(path):
+    try:
+        st = Path(path).stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def clear_index_cache():
+    """Clear the in-memory search index cache."""
+    _INDEX_CACHE.clear()
+
+
 def _load_index(base_dir, archive_dir):
-    if not archive_dir.exists():
+    archive_path = Path(archive_dir).resolve()
+    cache_key = str(archive_path)
+    if not archive_path.exists():
+        _INDEX_CACHE.pop(cache_key, None)
         return {"doc_count": 0, "skills": [], "df": {}, "avg_len": {}}
-    return skill_router.load_or_build_index(archive_dir=archive_dir, base_dir=base_dir)
+
+    index_sig = _file_sig(archive_path / "search_index.json")
+    manifest_sig = _file_sig(archive_path / "backup_manifest.json")
+    cached = _INDEX_CACHE.get(cache_key)
+    if cached is not None and cached[0] == index_sig and cached[1] == manifest_sig:
+        return cached[2]
+
+    data = skill_router.load_or_build_index(archive_dir=archive_path, base_dir=base_dir)
+    new_index_sig = _file_sig(archive_path / "search_index.json")
+    new_manifest_sig = _file_sig(archive_path / "backup_manifest.json")
+    _INDEX_CACHE[cache_key] = (new_index_sig, new_manifest_sig, data)
+    return data
 
 
 def _tool_result(text, is_error=False):
@@ -159,6 +225,78 @@ def _tool_result(text, is_error=False):
         "content": [{"type": "text", "text": text}],
         "isError": is_error,
     }
+
+
+def _short_desc(text, max_len=160):
+    collapsed = " ".join(str(text or "").split())
+    if len(collapsed) <= max_len:
+        return collapsed
+    return collapsed[: max_len - 3].rstrip() + "..."
+
+
+def _handle_list_skills(args, base_dir, archive_dir):
+    category = args.get("category")
+    if category is not None:
+        category = str(category).strip() or None
+
+    raw_inc = args.get("include_descriptions", False)
+    if isinstance(raw_inc, bool):
+        include_descriptions = raw_inc
+    elif isinstance(raw_inc, str):
+        include_descriptions = raw_inc.strip().lower() in ("true", "1", "yes")
+    else:
+        include_descriptions = bool(raw_inc)
+
+    index_data = _load_index(base_dir, archive_dir)
+    skills = index_data.get("skills", [])
+
+    grouped = {}
+    for entry in skills:
+        cat = entry.get("category") or "General & Utility Skills"
+        grouped.setdefault(cat, []).append(entry)
+
+    all_categories = sorted(grouped.keys(), key=str.lower)
+
+    if category:
+        cat_lower = category.lower()
+        filtered_items = [
+            (cat, items) for cat, items in grouped.items() if cat.lower() == cat_lower
+        ]
+    else:
+        filtered_items = list(grouped.items())
+
+    filtered_items.sort(key=lambda kv: (-len(kv[1]), kv[0].lower()))
+
+    cat_blocks = []
+    total_matching = 0
+    for cat, items in filtered_items:
+        sorted_entries = sorted(items, key=lambda s: s.get("name", "").lower())
+        total_matching += len(sorted_entries)
+        if include_descriptions:
+            skill_list = [
+                {
+                    "name": s["name"],
+                    "description": _short_desc(s.get("description", "")),
+                }
+                for s in sorted_entries
+            ]
+        else:
+            skill_list = [s["name"] for s in sorted_entries]
+        cat_blocks.append({
+            "category": cat,
+            "count": len(sorted_entries),
+            "skills": skill_list,
+        })
+
+    payload = {
+        "total_skills": total_matching,
+        "category_count": len(cat_blocks),
+        "categories": cat_blocks,
+    }
+    if category and total_matching == 0:
+        payload["available_categories"] = all_categories
+
+    return _tool_result(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
 def _handle_search_skills(args, base_dir, archive_dir):
@@ -171,6 +309,10 @@ def _handle_search_skills(args, base_dir, archive_dir):
     except (TypeError, ValueError):
         limit = 8
     limit = max(1, min(limit, 25))
+    try:
+        offset = max(0, int(args.get("offset", 0)))
+    except (TypeError, ValueError):
+        offset = 0
 
     index_data = _load_index(base_dir, archive_dir)
     skills = index_data.get("skills", [])
@@ -189,36 +331,55 @@ def _handle_search_skills(args, base_dir, archive_dir):
         }
         return _tool_result(json.dumps(summary, indent=2, ensure_ascii=False))
 
-    matches = skill_router.search_index(
+    all_matches = skill_router.search_index(
         index_data=index_data,
         query=query,
         category=category,
-        limit=limit,
+        limit=None,
     )
 
-    # Substring fallback for partial fragments (e.g., "proto") if tokenizer returned nothing
-    if not matches and query.strip():
+    # Substring fallback for partial fragments (e.g., "proto") if BM25 returned nothing
+    if not all_matches and query.strip():
         q_lower = query.strip().lower()
+        word_pat = re.compile(rf"(?<![a-z0-9]){re.escape(q_lower)}(?![a-z0-9])")
         fallback = []
         for entry in skills:
-            if category and entry.get("category", "").lower() != category.lower():
+            entry_cat = entry.get("category", "General & Utility Skills")
+            if category and entry_cat.lower() != category.lower():
                 continue
-            if (
-                q_lower in entry.get("name", "").lower()
-                or q_lower in entry.get("description", "").lower()
-                or q_lower in entry.get("category", "").lower()
-            ):
-                fallback.append({
-                    "name": entry["name"],
-                    "category": entry.get("category", "General & Utility Skills"),
-                    "score": 1.0,
-                    "description": entry.get("description", ""),
-                    "companion_files": entry.get("companion_files", []),
-                })
-        matches = fallback[:limit]
+            name_l = entry.get("name", "").lower()
+            aliases_l = [a.lower() for a in entry.get("aliases", [entry.get("name", "")])]
+            desc_l = entry.get("description", "").lower()
+            cat_l = entry_cat.lower()
+
+            if q_lower == name_l or q_lower in aliases_l:
+                score = 10.0
+            elif q_lower in name_l or any(q_lower in a for a in aliases_l):
+                score = 5.0
+            elif word_pat.search(desc_l):
+                score = 2.0
+            elif q_lower in desc_l or q_lower in cat_l:
+                score = 1.0
+            else:
+                continue
+
+            fallback.append({
+                "name": entry["name"],
+                "category": entry_cat,
+                "score": score,
+                "description": entry.get("description", ""),
+                "companion_files": entry.get("companion_files", []),
+            })
+        fallback.sort(key=lambda m: (-m["score"], m["name"].lower()))
+        all_matches = fallback
+
+    total_matches = len(all_matches)
+    matches = all_matches[offset : offset + limit]
 
     payload = {
         "query": query,
+        "total_matches": total_matches,
+        "offset": offset,
         "count": len(matches),
         "results": [
             {
@@ -405,6 +566,8 @@ def _dispatch_request(msg, base_dir, archive_dir):
         args = params.get("arguments") or {}
         if tool_name == "search_skills":
             res = _handle_search_skills(args, base_dir, archive_dir)
+        elif tool_name == "list_skills":
+            res = _handle_list_skills(args, base_dir, archive_dir)
         elif tool_name == "load_skill":
             res = _handle_load_skill(args, base_dir, archive_dir)
         else:

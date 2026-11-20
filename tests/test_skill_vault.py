@@ -29,7 +29,14 @@ import unittest
 # Import SkillVault from the parent scripts directory
 SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
-from skill_vault import SkillVault, resolve_base_dir, parse_version_tuple, compare_skill_recency
+from skill_vault import (
+    SkillVault,
+    resolve_base_dir,
+    parse_version_tuple,
+    compare_version_tuples,
+    get_skill_metadata,
+    compare_skill_recency,
+)
 
 
 class TestSkillVault(unittest.TestCase):
@@ -379,6 +386,50 @@ class TestSkillVault(unittest.TestCase):
         # Equal versions compare identical
         skill_c = self._create_mock_skill(self.skills_dir, "skill-c", version="v1")
         self.assertEqual(compare_skill_recency(skill_b, skill_c), 0)
+
+    def test_compare_version_tuples_and_nested_metadata_recency(self):
+        """Test zero-padded version tuples, nested metadata.version parsing, missing SKILL.md, and version tie-breakers."""
+        self.assertEqual(compare_version_tuples((1, 0), (1, 0, 0)), 0)
+        self.assertEqual(compare_version_tuples((2,), (1, 9, 9)), 1)
+        self.assertEqual(compare_version_tuples((1, 2), (1, 10)), -1)
+
+        # Nested metadata.version beats older version even if older version has a newer mtime
+        nested_new = self.archive_dir / "skills" / "nested-v24"
+        nested_new.mkdir(parents=True, exist_ok=True)
+        md_new = nested_new / "SKILL.md"
+        md_new.write_text("---\nname: nested-skill\nmetadata:\n  version: v24\n---\n\n# v24\n", encoding="utf-8")
+
+        nested_old = self.archive_dir / "skills" / "nested-v14"
+        nested_old.mkdir(parents=True, exist_ok=True)
+        md_old = nested_old / "SKILL.md"
+        md_old.write_text("---\nname: nested-skill\nmetadata:\n  version: v14\n---\n\n# v14\n", encoding="utf-8")
+
+        t_old = md_new.stat().st_mtime - 60
+        t_new = t_old + 120
+        os.utime(md_new, (t_old, t_old))
+        os.utime(md_old, (t_new, t_new))
+
+        ver_24, _ = get_skill_metadata(nested_new)
+        ver_14, _ = get_skill_metadata(nested_old)
+        self.assertEqual(ver_24, (24,))
+        self.assertEqual(ver_14, (14,))
+        self.assertEqual(compare_skill_recency(nested_new, nested_old), 1)
+        self.assertEqual(compare_skill_recency(nested_old, nested_new), -1)
+
+        # Existing SKILL.md beats missing SKILL.md
+        missing_dir = self.archive_dir / "skills" / "missing-skill"
+        missing_dir.mkdir(parents=True, exist_ok=True)
+        self.assertEqual(compare_skill_recency(nested_new, missing_dir), 1)
+        self.assertEqual(compare_skill_recency(missing_dir, nested_new), -1)
+
+        # Tied timestamps break in favor of an explicitly versioned skill
+        unver_dir = self.archive_dir / "skills" / "unversioned-skill"
+        unver_dir.mkdir(parents=True, exist_ok=True)
+        md_unver = unver_dir / "SKILL.md"
+        md_unver.write_text("---\nname: nested-skill\n---\n\n# unversioned\n", encoding="utf-8")
+        os.utime(md_unver, (t_old, t_old))
+        self.assertEqual(compare_skill_recency(nested_new, unver_dir), 1)
+        self.assertEqual(compare_skill_recency(unver_dir, nested_new), -1)
 
     def test_archive_prioritizes_newer_version(self):
         """Test archiving overwrites older archive if active is newer, but preserves newer archive if active is older."""

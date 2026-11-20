@@ -4,7 +4,7 @@ version: 2.0.0
 description: >-
   Universal agent-agnostic skill router and tiered storage manager.
   Background hooks automatically inject relevant vaulted skills on demand;
-  use MCP tools search_skills/load_skill for mid-turn lookups.
+  use MCP tools list_skills/search_skills/load_skill for mid-turn lookups.
 ---
 
 # Skill Vault: Automatic Skill Router & Cold-Storage Manager
@@ -16,7 +16,8 @@ description: >-
    - `PreInvocation` / `UserPromptSubmit` / `BeforeAgent` scores the user prompt via a pre-built BM25 + multi-signal index (`<100ms`), injects top high-confidence skills or compact pointers directly from L2, and injects **0 tokens** on unrelated turns.
 2. **Read-Only MCP Fallback (Mid-Turn Discovery)**:
    - If a task pivots mid-turn to a specialized domain not present in context, call the `skill-vault` MCP tools:
-     - `search_skills(query, category?, limit?)` — Search vaulted L2 skills by keyword, intent, or list categories.
+     - `list_skills(category?, include_descriptions?)` — List all vaulted L2 skill names grouped by category in one call.
+     - `search_skills(query, category?, limit?, offset?)` — Search vaulted L2 skills by keyword, intent, or list categories.
      - `load_skill(name, file?)` — Read a vaulted skill's `SKILL.md` or any companion file (`references/`, `scripts/`, `examples/`).
    - Never mutate L1 active directories or run shell commands solely to browse archived skills when MCP tools are available.
 
@@ -43,7 +44,7 @@ skill-vault sync [--dry-run] [--keep-active]
 # Re-classify 'General & Utility Skills' using built-in + custom rules
 skill-vault recategorize --auto [--dry-run]
 
-# Consolidate hyphen/underscore duplicate skills in L2 (keeps newest version)
+# Consolidate duplicate skills in L2 (keeps newest version)
 skill-vault dedupe [--dry-run]
 
 # Inspect or tune routing thresholds & core skills

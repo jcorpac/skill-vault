@@ -9,11 +9,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from skill_vault import SkillVault  # noqa: E402
+import mcp_server  # noqa: E402
 import skill_router  # noqa: E402
 
 
@@ -266,10 +268,10 @@ class TestHooksAndMCP(unittest.TestCase):
 
     # --- Read-Only MCP Stdio Server Tests ---
 
-    def _communicate_mcp_newline(self, messages):
+    def _communicate_mcp_newline(self, messages, base_dir=None):
         stdin_payload = "".join(json.dumps(m) + "\n" for m in messages).encode("utf-8")
         proc = subprocess.run(
-            [sys.executable, str(SCRIPT_DIR / "mcp_server.py"), "--base-dir", str(self.base_dir)],
+            [sys.executable, str(SCRIPT_DIR / "mcp_server.py"), "--base-dir", str(base_dir or self.base_dir)],
             input=stdin_payload,
             capture_output=True,
         )
@@ -326,7 +328,7 @@ class TestHooksAndMCP(unittest.TestCase):
                 self.assertEqual(by_id[1]["result"]["serverInfo"]["name"], "skill-vault")
                 # 2. tools/list
                 tools = by_id[2]["result"]["tools"]
-                self.assertEqual([t["name"] for t in tools], ["search_skills", "load_skill"])
+                self.assertEqual([t["name"] for t in tools], ["search_skills", "list_skills", "load_skill"])
                 for t in tools:
                     self.assertTrue(t["annotations"]["readOnlyHint"])
                     self.assertFalse(t["annotations"]["destructiveHint"])
@@ -345,6 +347,119 @@ class TestHooksAndMCP(unittest.TestCase):
                 # 7. path traversal rejected
                 self.assertTrue(by_id[7]["result"]["isError"])
                 self.assertIn("traversal", by_id[7]["result"]["content"][0]["text"].lower())
+
+    def test_mcp_list_skills_and_search_pagination(self):
+        """list_skills returns >25 skills in one compact call; search_skills supports offset pagination."""
+        list_base = Path(self.tmp.name) / "list_vault"
+        list_base.mkdir(parents=True, exist_ok=True)
+        list_mgr = SkillVault(base_dir=str(list_base))
+        list_mgr.init()
+        manifest = []
+        for i in range(30):
+            name = f"big-skill-{i:02d}"
+            sdir = list_base / "skill_archive" / "skills" / name
+            sdir.mkdir(parents=True, exist_ok=True)
+            (sdir / "SKILL.md").write_text(
+                f"---\nname: {name}\nversion: 1.0\ndescription: Description for {name}.\n---\n\n# {name}\n",
+                encoding="utf-8",
+            )
+            manifest.append({
+                "name": name,
+                "category": "Big Category",
+                "original_path": f"skills/{name}",
+                "archived_path": f"skill_archive/skills/{name}",
+            })
+        for i in range(2):
+            name = f"small-skill-{i:02d}"
+            sdir = list_base / "skill_archive" / "skills" / name
+            sdir.mkdir(parents=True, exist_ok=True)
+            (sdir / "SKILL.md").write_text(
+                f"---\nname: {name}\nversion: 1.0\ndescription: Description for {name}.\n---\n\n# {name}\n",
+                encoding="utf-8",
+            )
+            manifest.append({
+                "name": name,
+                "category": "Small Category",
+                "original_path": f"skills/{name}",
+                "archived_path": f"skill_archive/skills/{name}",
+            })
+        list_mgr.save_manifest(manifest)
+        list_mgr.reindex()
+
+        requests = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "list_skills", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "list_skills", "arguments": {"category": "big category", "include_descriptions": True}}},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "list_skills", "arguments": {"category": "NoSuchCategory"}}},
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "search_skills", "arguments": {"query": "", "category": "Big Category", "limit": 25, "offset": 25}}},
+        ]
+        resps = self._communicate_mcp_newline(requests, base_dir=list_base)
+        by_id = {r["id"]: json.loads(r["result"]["content"][0]["text"]) for r in resps}
+
+        self.assertEqual(by_id[1]["total_skills"], 32)
+        self.assertEqual(by_id[1]["category_count"], 2)
+        big_cat = next(c for c in by_id[1]["categories"] if c["category"] == "Big Category")
+        self.assertEqual(big_cat["count"], 30)
+        self.assertEqual(len(big_cat["skills"]), 30)
+        self.assertIsInstance(big_cat["skills"][0], str)
+
+        self.assertEqual(by_id[2]["total_skills"], 30)
+        self.assertEqual(len(by_id[2]["categories"][0]["skills"]), 30)
+        self.assertIsInstance(by_id[2]["categories"][0]["skills"][0], dict)
+        self.assertIn("name", by_id[2]["categories"][0]["skills"][0])
+        self.assertIn("description", by_id[2]["categories"][0]["skills"][0])
+
+        self.assertEqual(by_id[3]["total_skills"], 0)
+        self.assertEqual(by_id[3]["available_categories"], ["Big Category", "Small Category"])
+
+        self.assertEqual(by_id[4]["total_matches"], 30)
+        self.assertEqual(by_id[4]["offset"], 25)
+        self.assertEqual(by_id[4]["count"], 5)
+
+    def test_mcp_short_query_and_fallback_ranking(self):
+        """Short queries like 'uv' match accurately, unknown short queries return 0, and fallback ranks name > description."""
+        self._add_archived_skill("uv", "Science & Biomedicine", "Install uv Python package manager.")
+        self._add_archived_skill("alpha-protein", "Science & Biomedicine", "Analyze proteins with no short token.")
+        self._add_archived_skill("xy-tool", "Science & Biomedicine", "Helper tool.")
+        self._add_archived_skill("beta-tool", "Science & Biomedicine", "Contains proxy fragment.")
+        self.mgr.reindex()
+
+        requests = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "search_skills", "arguments": {"query": "uv", "category": "Science & Biomedicine"}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "search_skills", "arguments": {"query": "zx", "category": "Science & Biomedicine"}}},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "search_skills", "arguments": {"query": "xy", "category": "Science & Biomedicine"}}},
+        ]
+        resps = self._communicate_mcp_newline(requests)
+        by_id = {r["id"]: json.loads(r["result"]["content"][0]["text"]) for r in resps}
+
+        uv_names = [r["name"] for r in by_id[1]["results"]]
+        self.assertGreaterEqual(len(uv_names), 1)
+        self.assertEqual(uv_names[0], "uv")
+        self.assertNotIn("alpha-protein", uv_names)
+
+        self.assertEqual(by_id[2]["count"], 0)
+        self.assertEqual(by_id[2]["results"], [])
+
+        xy_names = [r["name"] for r in by_id[3]["results"]]
+        self.assertEqual(xy_names, ["xy-tool", "beta-tool"])
+
+    def test_mcp_index_memory_cache_and_invalidation(self):
+        """_load_index caches parsed index in memory and invalidates when search_index.json changes on disk."""
+        mcp_server.clear_index_cache()
+        orig_loader = skill_router.load_or_build_index
+        with mock.patch.object(skill_router, "load_or_build_index", wraps=orig_loader) as spy:
+            d1 = mcp_server._load_index(self.base_dir, self.archive_dir)
+            d2 = mcp_server._load_index(self.base_dir, self.archive_dir)
+            self.assertEqual(spy.call_count, 1)
+            self.assertEqual(len(d1["skills"]), 2)
+            self.assertIs(d1, d2)
+
+            self._add_archived_skill("bigquery-sql", "BigQuery & Data Warehouse", "Optimize BigQuery SQL queries.")
+            self.mgr.reindex()
+
+            d3 = mcp_server._load_index(self.base_dir, self.archive_dir)
+            self.assertEqual(spy.call_count, 2)
+            self.assertEqual(len(d3["skills"]), 3)
+        mcp_server.clear_index_cache()
 
     # --- CLI Commands: recategorize --auto, dedupe, route, stats, setup -> uninstall ---
 
@@ -365,6 +480,63 @@ class TestHooksAndMCP(unittest.TestCase):
         self.assertIn("bigquery-sql", manifest_after)
         self.assertNotIn("bigquery_sql", manifest_after)
         self.assertFalse((self.archive_dir / "skills" / "bigquery_sql").exists())
+
+    def test_dedupe_extended_matching_and_newer_version_selection(self):
+        """dedupe catches separator-stripped, frontmatter-name, identical-content, and nested metadata.version duplicates."""
+        dedupe_base = Path(self.tmp.name) / "dedupe_vault"
+        dedupe_base.mkdir(parents=True, exist_ok=True)
+        dmgr = SkillVault(base_dir=str(dedupe_base))
+        dmgr.init()
+        arch_skills = dedupe_base / "skill_archive" / "skills"
+
+        def _write_skill(folder, body, mtime_val):
+            sdir = arch_skills / folder
+            sdir.mkdir(parents=True, exist_ok=True)
+            md = sdir / "SKILL.md"
+            md.write_text(body, encoding="utf-8")
+            os.utime(md, (mtime_val, mtime_val))
+            return {
+                "name": folder,
+                "category": "Testing",
+                "original_path": f"skills/{folder}",
+                "archived_path": f"skill_archive/skills/{folder}",
+            }
+
+        t0 = 1760000000.0
+        manifest = [
+            # 1. Separator-stripped (older vs newer mtime)
+            _write_skill("science_skills_common", "---\nname: science_skills_common\ndescription: Common package.\n---\n# Old\n", t0),
+            _write_skill("scienceskillscommon", "---\nname: scienceskillscommon\ndescription: Common package.\n---\n# New\n", t0 + 10),
+            # 2. Frontmatter name alias across different folder names
+            _write_skill("legacy-bq-copy", "---\nname: bigquery-helper\nversion: 1.0\ndescription: Old helper.\n---\n# Old\n", t0 + 20),
+            _write_skill("modern-bq", "---\nname: bigquery-helper\nversion: 2.0\ndescription: New helper.\n---\n# New\n", t0),
+            # 3. Identical SKILL.md content hash (>= 64 bytes, no frontmatter name)
+            _write_skill("notes-old", "# Shared Notes\nThis identical reference body is well over sixty-four bytes in length for deduplication.\n", t0),
+            _write_skill("notes-new", "# Shared Notes\nThis identical reference body is well over sixty-four bytes in length for deduplication.\n", t0 + 10),
+            # 4. Nested metadata.version (v24 older mtime vs v14 newer mtime)
+            _write_skill("gcp_spark", "---\nname: gcp-spark\nmetadata:\n  version: v14\ndescription: Spark v14.\n---\n# v14\n", t0 + 20),
+            _write_skill("gcp-spark", "---\nname: gcp-spark\nmetadata:\n  version: v24\ndescription: Spark v24.\n---\n# v24\n", t0),
+        ]
+        dmgr.save_manifest(manifest)
+        dmgr.reindex()
+
+        # Dry run preserves all 8 folders
+        self.assertEqual(dmgr.dedupe(dry_run=True), 0)
+        self.assertEqual(len(dmgr.load_manifest()), 8)
+        for item in manifest:
+            self.assertTrue((arch_skills / item["name"] / "SKILL.md").exists())
+
+        # Live dedupe keeps only the 4 newer winners
+        self.assertEqual(dmgr.dedupe(dry_run=False), 0)
+        kept = {m["name"] for m in dmgr.load_manifest()}
+        self.assertEqual(kept, {"scienceskillscommon", "modern-bq", "notes-new", "gcp-spark"})
+        for winner in kept:
+            self.assertTrue((arch_skills / winner / "SKILL.md").exists())
+        for loser in ("science_skills_common", "legacy-bq-copy", "notes-old", "gcp_spark"):
+            self.assertFalse((arch_skills / loser).exists())
+
+        idx = json.loads((dedupe_base / "skill_archive" / "search_index.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(idx["skills"]), 4)
 
     def test_route_stats_and_setup_uninstall_roundtrip(self):
         """Test sandboxed setup -> PreInvocation -> stats -> route -> uninstall cleanup."""

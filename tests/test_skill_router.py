@@ -2,6 +2,8 @@
 """Unit tests for scripts/skill_router.py (BM25 index, precision/recall, ambiguity, budgets, dedup)."""
 
 from pathlib import Path
+import json
+import os
 import sys
 import tempfile
 import unittest
@@ -230,6 +232,79 @@ class TestSkillRouter(unittest.TestCase):
         self.assertTrue(res["inline"][0]["truncated"])
         self.assertLessEqual(len(res["injection_text"]), 10500)
         self.assertIn("load_skill", res["inline"][0]["content"])
+
+    def test_short_query_with_category_does_not_dump_category(self):
+        """Non-empty short/stopword query inside a category returns [] instead of dumping all category skills."""
+        empty_res = skill_router.search_index(self.index, query="", category="AlloyDB", limit=None)
+        self.assertEqual(len(empty_res), 6)
+        short_res = skill_router.search_index(self.index, query="zx", category="AlloyDB", limit=None)
+        self.assertEqual(short_res, [])
+
+    def test_load_or_build_index_does_not_downgrade_newer_schema(self):
+        """load_or_build_index accepts schema_version >= INDEX_SCHEMA_VERSION without overwriting it."""
+        index_path = self.archive_dir / "search_index.json"
+        data = json.loads(index_path.read_text(encoding="utf-8"))
+        newer_ver = skill_router.INDEX_SCHEMA_VERSION + 1
+        data["schema_version"] = newer_ver
+        index_path.write_text(json.dumps(data), encoding="utf-8")
+
+        loaded = skill_router.load_or_build_index(archive_dir=self.archive_dir, base_dir=self.base_dir)
+        self.assertEqual(loaded["schema_version"], newer_ver)
+        on_disk = json.loads(index_path.read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["schema_version"], newer_ver)
+
+    def test_canonical_dedup_separator_stripped_and_nested_metadata_version(self):
+        """build_search_index collapses separator-stripped duplicates and respects nested metadata.version."""
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            base = Path(tmp.name).resolve()
+            arch = base / "skill_archive"
+            mgr = SkillVault(base_dir=str(base))
+            mgr.init()
+
+            # 1. Separator-stripped: science_skills_common (older) vs scienceskillscommon (newer)
+            d1 = arch / "skills" / "science_skills_common"
+            d2 = arch / "skills" / "scienceskillscommon"
+            d1.mkdir(parents=True, exist_ok=True)
+            d2.mkdir(parents=True, exist_ok=True)
+            md1 = d1 / "SKILL.md"
+            md2 = d2 / "SKILL.md"
+            md1.write_text("---\nname: science_skills_common\ndescription: Common science helpers.\n---\n# Old\n", encoding="utf-8")
+            md2.write_text("---\nname: scienceskillscommon\ndescription: Common science helpers.\n---\n# New\n", encoding="utf-8")
+            t_base = md1.stat().st_mtime - 20
+            os.utime(md1, (t_base, t_base))
+            os.utime(md2, (t_base + 10, t_base + 10))
+
+            # 2. Nested metadata.version: gcp_spark (v14, newer mtime) vs gcp-spark (v24, older mtime)
+            d3 = arch / "skills" / "gcp_spark"
+            d4 = arch / "skills" / "gcp-spark"
+            d3.mkdir(parents=True, exist_ok=True)
+            d4.mkdir(parents=True, exist_ok=True)
+            md3 = d3 / "SKILL.md"
+            md4 = d4 / "SKILL.md"
+            md3.write_text("---\nname: gcp-spark\nmetadata:\n  version: v14\ndescription: Spark v14.\n---\n# Spark 14\n", encoding="utf-8")
+            md4.write_text("---\nname: gcp-spark\nmetadata:\n  version: v24\ndescription: Spark v24.\n---\n# Spark 24\n", encoding="utf-8")
+            os.utime(md4, (t_base, t_base))
+            os.utime(md3, (t_base + 10, t_base + 10))
+
+            manifest = [
+                {"name": "science_skills_common", "category": "Science & Biomedicine", "original_path": "skills/science_skills_common", "archived_path": "skill_archive/skills/science_skills_common"},
+                {"name": "scienceskillscommon", "category": "Science & Biomedicine", "original_path": "skills/scienceskillscommon", "archived_path": "skill_archive/skills/scienceskillscommon"},
+                {"name": "gcp_spark", "category": "GCP & Data Engineering", "original_path": "skills/gcp_spark", "archived_path": "skill_archive/skills/gcp_spark"},
+                {"name": "gcp-spark", "category": "GCP & Data Engineering", "original_path": "skills/gcp-spark", "archived_path": "skill_archive/skills/gcp-spark"},
+            ]
+            mgr.save_manifest(manifest)
+            idx = skill_router.build_search_index(archive_dir=arch, manifest=manifest, base_dir=base, resolve_path_fn=mgr.resolve_portable_path)
+            by_name = {s["name"]: s for s in idx["skills"]}
+
+            self.assertEqual(len(by_name), 2)
+            self.assertIn("scienceskillscommon", by_name)
+            self.assertCountEqual(by_name["scienceskillscommon"]["aliases"], ["science_skills_common", "scienceskillscommon"])
+            self.assertIn("gcp-spark", by_name)
+            self.assertEqual(by_name["gcp-spark"]["version_tuple"], [24])
+            self.assertCountEqual(by_name["gcp-spark"]["aliases"], ["gcp_spark", "gcp-spark"])
+        finally:
+            tmp.cleanup()
 
 
 if __name__ == "__main__":

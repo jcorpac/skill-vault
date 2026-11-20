@@ -28,9 +28,10 @@ Loading 50–250+ specialized skills into active AI prompts causes:
 └──────────────┬────────────────────────────────────────┬─────────────────┘
                │                                        │
    [1. Background Lifecycle Hooks]         [2. Mid-Turn Read-Only MCP]
-     • SessionStart (silent sync & index)    • search_skills(query)
-     • PreInvocation / UserPromptSubmit      • load_skill(name, file?)
-       └─► Pre-built BM25 + Multi-Signal Router (~50–90ms, no approvals)
+     • SessionStart (silent sync & index)    • list_skills(category?)
+     • PreInvocation / UserPromptSubmit      • search_skills(query)
+       └─► Pre-built BM25 + Multi-Signal       • load_skill(name, file?)
+           Router (~50–90ms, no approvals)
            ├─ Unrelated prompt  ──► Injects 0 tokens
            ├─ High confidence   ──► Inlines top 1–2 SKILL.md (<=12 KB cap)
            └─ Broad / medium    ──► Emits 1-line compact pointers
@@ -96,7 +97,7 @@ python scripts/skill_vault.py verify --fix
 ## 🎯 Key Design Principles
 
 1. **Zero Context Bloat by Default**: Generic prompts (`"Refactor this function"`, `"Write a git commit message"`) inject **0 tokens**. Same-turn tool-call loops short-circuit automatically, and already-injected skills never re-inject in the same conversation.
-2. **Zero-Approval Background Execution**: Hooks run natively in the agent lifecycle before the model is called; mid-turn fallback uses a 2-tool read-only MCP server (`search_skills`, `load_skill`) with strict directory-containment guards.
+2. **Zero-Approval Background Execution**: Hooks run natively in the agent lifecycle before the model is called; mid-turn fallback uses a 3-tool read-only MCP server (`list_skills`, `search_skills`, `load_skill`) with strict directory-containment guards.
 3. **`SKILL.md` Purity**: `SKILL.md` files are never modified during indexing or categorization.
 4. **Hook-Dependency Safety**: `sync`, `optimize`, and `archive` inspect sibling `hooks.json` and `mcp_config.json` files so plugin-referenced skill scripts are never accidentally pruned.
 5. **Zero Runtime Dependencies**: Pure Python 3.10+ standard library across Windows, macOS, and Linux.
