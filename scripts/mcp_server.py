@@ -20,7 +20,7 @@ if str(SCRIPT_DIR) not in sys.path:
 import skill_router  # noqa: E402
 
 SERVER_NAME = "skill-vault"
-SERVER_VERSION = "2.0.1"
+SERVER_VERSION = "2.1.0"
 MAX_READ_BYTES = 102400  # 100 KB safety cap per tool call
 
 TOOLS_SPEC = [

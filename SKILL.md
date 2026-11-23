@@ -1,6 +1,6 @@
 ---
 name: skill-vault
-version: 2.0.1
+version: 2.1.0
 description: >-
   Universal agent-agnostic skill router and tiered storage manager.
   Background hooks automatically inject relevant vaulted skills on demand;

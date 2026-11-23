@@ -3422,7 +3422,7 @@ class SkillVault:
                 plugin_meta = {
                     "name": "skill-vault",
                     "displayName": "Skill Vault",
-                    "version": "2.0.1",
+                    "version": "2.1.0",
                     "description": "Automatic background skill router, cold-storage archive, and read-only JIT MCP server.",
                     "author": "jcorpac",
                     "license": "MIT",
