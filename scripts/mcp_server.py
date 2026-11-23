@@ -94,8 +94,8 @@ TOOLS_SPEC = [
     {
         "name": "load_skill",
         "description": (
-            "Load the full SKILL.md instructions for a vaulted skill, or read a specific "
-            "companion file (e.g. 'references/guide.md') inside that skill's directory."
+            "Load SKILL.md instructions (full, by heading section, or by line range) for a vaulted skill, "
+            "or read a specific companion file (e.g. 'references/guide.md') inside that skill's directory."
         ),
         "inputSchema": {
             "type": "object",
@@ -107,6 +107,18 @@ TOOLS_SPEC = [
                 "file": {
                     "type": "string",
                     "description": "Optional relative path to a companion file inside the skill folder.",
+                },
+                "section": {
+                    "type": "string",
+                    "description": "Optional Markdown heading name/substring to extract a single section from SKILL.md (case-insensitive).",
+                },
+                "start_line": {
+                    "type": "integer",
+                    "description": "Optional 1-based start line to read a line range from SKILL.md or a companion file.",
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": "Optional 1-based inclusive end line for line-range reads.",
                 },
             },
             "required": ["name"],
@@ -409,6 +421,76 @@ def _find_skill_entry(index_data, skill_name):
     return None
 
 
+def _extract_markdown_section(content, section_query):
+    """Extract a single Markdown heading section outside fenced code blocks."""
+    lines = content.splitlines()
+    headings = []
+    in_fence = False
+    fence_marker = None
+    for idx, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            if not in_fence:
+                in_fence = True
+                fence_marker = marker
+            elif marker == fence_marker:
+                in_fence = False
+                fence_marker = None
+            continue
+        if in_fence:
+            continue
+        m = re.match(r"^(#{1,6})\s+(.+?)\s*#*\s*$", line)
+        if m:
+            level = len(m.group(1))
+            title = " ".join(m.group(2).split())
+            if title:
+                headings.append((idx, level, title))
+
+    all_titles = [t for _, _, t in headings]
+    q_lower = section_query.strip().lower()
+    matched = None
+    for idx, level, title in headings:
+        if title.lower() == q_lower:
+            matched = (idx, level, title)
+            break
+    if matched is None:
+        for idx, level, title in headings:
+            if q_lower in title.lower():
+                matched = (idx, level, title)
+                break
+    if matched is None:
+        return None, 0, 0, None, all_titles
+
+    start_idx, m_level, m_title = matched
+    end_idx = len(lines)
+    for idx, level, _ in headings:
+        if idx > start_idx and level <= m_level:
+            end_idx = idx
+            break
+    section_text = "\n".join(lines[start_idx:end_idx])
+    return section_text, start_idx + 1, end_idx, m_title, all_titles
+
+
+def _slice_lines(content, start_line=None, end_line=None):
+    """Slice 1-based inclusive line range from text content."""
+    lines = content.splitlines()
+    total = len(lines)
+    s = max(1, start_line if start_line is not None else 1)
+    e = min(total, end_line) if end_line is not None else total
+    if total == 0 or s > total:
+        return "", s, min(e, total), total
+    return "\n".join(lines[s - 1 : e]), s, e, total
+
+
+def _cap_utf8_text(text, max_bytes=MAX_READ_BYTES):
+    raw = text.encode("utf-8", errors="replace")
+    if len(raw) <= max_bytes:
+        return text
+    capped = raw[:max_bytes].decode("utf-8", errors="replace")
+    return capped + f"\n\n[... truncated at {max_bytes} bytes ...]"
+
+
 def _handle_load_skill(args, base_dir, archive_dir):
     skill_name = str(args.get("name") or "").strip()
     if not skill_name:
@@ -417,6 +499,31 @@ def _handle_load_skill(args, base_dir, archive_dir):
     rel_file = args.get("file")
     if rel_file is not None:
         rel_file = str(rel_file).strip() or None
+
+    section = args.get("section")
+    if section is not None:
+        section = str(section).strip() or None
+
+    start_line = None
+    if args.get("start_line") is not None and args.get("start_line") != "":
+        try:
+            start_line = int(args["start_line"])
+        except (TypeError, ValueError):
+            return _tool_result("Error: 'start_line' must be a positive integer.", is_error=True)
+        if start_line < 1:
+            return _tool_result("Error: 'start_line' must be a positive integer.", is_error=True)
+
+    end_line = None
+    if args.get("end_line") is not None and args.get("end_line") != "":
+        try:
+            end_line = int(args["end_line"])
+        except (TypeError, ValueError):
+            return _tool_result("Error: 'end_line' must be a positive integer.", is_error=True)
+        if end_line < 1:
+            return _tool_result("Error: 'end_line' must be a positive integer.", is_error=True)
+
+    if start_line is not None and end_line is not None and end_line < start_line:
+        return _tool_result("Error: 'end_line' must be >= 'start_line'.", is_error=True)
 
     index_data = _load_index(base_dir, archive_dir)
     entry = _find_skill_entry(index_data, skill_name)
@@ -427,71 +534,118 @@ def _handle_load_skill(args, base_dir, archive_dir):
             is_error=True,
         )
 
-    skill_dir = None
+    archive_skill_dir = None
     if entry.get("resolved_path") and Path(entry["resolved_path"]).exists():
-        skill_dir = Path(entry["resolved_path"]).resolve()
+        archive_skill_dir = Path(entry["resolved_path"]).resolve()
     elif entry.get("archived_path"):
         cand = skill_router._resolve_archived_skill_dir(base_dir, archive_dir, entry["archived_path"])
         if cand.exists():
-            skill_dir = cand.resolve()
+            archive_skill_dir = cand.resolve()
 
-    if not skill_dir or not skill_dir.exists():
+    if not archive_skill_dir or not archive_skill_dir.exists():
         return _tool_result(
             f"Error: Archived directory for skill '{skill_name}' does not exist on disk.",
             is_error=True,
         )
 
-    if rel_file:
-        # Strict path traversal check: target must reside inside skill_dir
-        try:
-            req_path = Path(rel_file)
-            if req_path.is_absolute():
-                return _tool_result(
-                    "Error: Absolute paths are not allowed; provide a relative path inside the skill directory.",
-                    is_error=True,
-                )
-            target = (skill_dir / req_path).resolve()
-            if skill_dir not in target.parents:
-                return _tool_result(
-                    "Error: Path traversal denied; companion file must reside inside the skill directory.",
-                    is_error=True,
-                )
-        except Exception as exc:
-            return _tool_result(f"Error resolving path: {exc}", is_error=True)
+    runtime_dir = None
+    if entry.get("runtime_dir"):
+        cand_rt = Path(entry["runtime_dir"])
+        if cand_rt.exists() and cand_rt.is_dir():
+            runtime_dir = cand_rt.resolve()
 
-        if not target.exists() or not target.is_file():
+    if rel_file:
+        # Strict path traversal check across candidate roots (runtime_dir then archive_skill_dir)
+        req_path = Path(rel_file)
+        if req_path.is_absolute():
+            return _tool_result(
+                "Error: Absolute paths are not allowed; provide a relative path inside the skill directory.",
+                is_error=True,
+            )
+
+        roots = [runtime_dir, archive_skill_dir] if runtime_dir and runtime_dir != archive_skill_dir else [archive_skill_dir]
+        target = None
+        for root_dir in roots:
+            try:
+                cand_target = (root_dir / req_path).resolve()
+                if root_dir not in cand_target.parents:
+                    return _tool_result(
+                        "Error: Path traversal denied; companion file must reside inside the skill directory.",
+                        is_error=True,
+                    )
+            except Exception as exc:
+                return _tool_result(f"Error resolving path: {exc}", is_error=True)
+            if cand_target.exists() and cand_target.is_file():
+                target = cand_target
+                break
+
+        if target is None:
             return _tool_result(
                 f"Error: Companion file '{rel_file}' not found inside '{entry['name']}'.",
                 is_error=True,
             )
 
-        raw = target.read_bytes()
-        truncated = len(raw) > MAX_READ_BYTES
-        text = raw[:MAX_READ_BYTES].decode("utf-8", errors="replace")
-        if truncated:
-            text += f"\n\n[... truncated at {MAX_READ_BYTES} bytes ...]"
-        header = f"# {entry['name']} :: {rel_file}\n\n"
+        lines_info = ""
+        if start_line is not None or end_line is not None:
+            full_text = target.read_text(encoding="utf-8", errors="replace")
+            text, s, e, total_lines = _slice_lines(full_text, start_line, end_line)
+            text = _cap_utf8_text(text)
+            lines_info = f"Lines: {s}-{e} of {total_lines}\n"
+        else:
+            raw = target.read_bytes()
+            truncated = len(raw) > MAX_READ_BYTES
+            text = raw[:MAX_READ_BYTES].decode("utf-8", errors="replace")
+            if truncated:
+                text += f"\n\n[... truncated at {MAX_READ_BYTES} bytes ...]"
+        header = f"# {entry['name']} :: {rel_file}\n{lines_info}\n"
         return _tool_result(header + text)
 
-    skill_md = skill_dir / "SKILL.md"
+    skill_md = archive_skill_dir / "SKILL.md"
     if not skill_md.exists():
         return _tool_result(
             f"Error: SKILL.md missing for skill '{entry['name']}'.",
             is_error=True,
         )
 
-    raw = skill_md.read_bytes()
-    truncated = len(raw) > MAX_READ_BYTES
-    content = raw[:MAX_READ_BYTES].decode("utf-8", errors="replace")
-    if truncated:
-        content += f"\n\n[... truncated at {MAX_READ_BYTES} bytes ...]"
+    section_line = ""
+    if section is not None or start_line is not None or end_line is not None:
+        full_text = skill_md.read_text(encoding="utf-8", errors="replace")
+        total_lines = len(full_text.splitlines())
+        if section is not None:
+            sec_text, s, e, m_title, all_titles = _extract_markdown_section(full_text, section)
+            if sec_text is None:
+                avail = ", ".join(all_titles[:30]) if all_titles else "(none)"
+                return _tool_result(
+                    f"Error: Section '{section}' not found in '{entry['name']}'. Available headings: {avail}",
+                    is_error=True,
+                )
+            content = _cap_utf8_text(sec_text)
+            section_line = f"Section: {m_title} (lines {s}-{e} of {total_lines})\n"
+        else:
+            sliced, s, e, total_lines = _slice_lines(full_text, start_line, end_line)
+            content = _cap_utf8_text(sliced)
+            section_line = f"Lines: {s}-{e} of {total_lines}\n"
+    else:
+        raw = skill_md.read_bytes()
+        truncated = len(raw) > MAX_READ_BYTES
+        content = raw[:MAX_READ_BYTES].decode("utf-8", errors="replace")
+        if truncated:
+            content += f"\n\n[... truncated at {MAX_READ_BYTES} bytes ...]"
 
+    effective_dir = runtime_dir or archive_skill_dir
+    extra_rt = (
+        f"Archive Directory: {archive_skill_dir}\n"
+        if runtime_dir and runtime_dir != archive_skill_dir
+        else ""
+    )
     companions = entry.get("companion_files", [])
     comp_line = ", ".join(companions) if companions else "(none)"
     header = (
         f"Skill: {entry['name']}\n"
         f"Category: {entry.get('category', 'General & Utility Skills')}\n"
-        f"Directory: {skill_dir}\n"
+        f"Directory: {effective_dir}\n"
+        f"{extra_rt}"
+        f"{section_line}"
         f"Companion Files: {comp_line}\n"
         f"---\n"
     )

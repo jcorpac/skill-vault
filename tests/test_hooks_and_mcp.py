@@ -461,6 +461,82 @@ class TestHooksAndMCP(unittest.TestCase):
             self.assertEqual(len(d3["skills"]), 3)
         mcp_server.clear_index_cache()
 
+    def test_mcp_load_skill_section_line_range_and_runtime_dir(self):
+        """load_skill supports section, start_line/end_line, and runtime_dir headers + companion resolution."""
+        rt_base = Path(self.tmp.name) / "rt_mcp_vault"
+        rt_base.mkdir(parents=True, exist_ok=True)
+        rmgr = SkillVault(base_dir=str(rt_base))
+        rmgr.init()
+
+        arch_dir = rt_base / "skill_archive" / "skills" / "multi-sec"
+        (arch_dir / "scripts").mkdir(parents=True, exist_ok=True)
+        (arch_dir / "SKILL.md").write_text(
+            "---\nname: multi-sec\ndescription: Multi-section skill.\n---\n"
+            "# Overview\nIntro line 1\nIntro line 2\n"
+            "## Physics Audit\nAudit line A\nAudit line B\n"
+            "### Sub Remediation\nFix step 1\n"
+            "## Output Format\nFinal summary\n",
+            encoding="utf-8",
+        )
+        (arch_dir / "scripts" / "tool.py").write_text("line1\nline2\nline3\nline4\n", encoding="utf-8")
+
+        rt_dir = rt_base / "plugins" / "rt-plug" / "skills" / "multi-sec"
+        (rt_dir / "scripts").mkdir(parents=True, exist_ok=True)
+        (rt_dir / "scripts" / "tool.py").write_text("rt_line1\nrt_line2\nrt_line3\nrt_line4\n", encoding="utf-8")
+
+        rmgr.save_manifest([{
+            "name": "multi-sec",
+            "category": "Testing",
+            "original_path": "plugins/rt-plug/skills/multi-sec",
+            "archived_path": "skill_archive/skills/multi-sec",
+            "runtime_dir": "plugins/rt-plug/skills/multi-sec",
+            "relocation_mode": "runtime_in_place",
+        }])
+        rmgr.reindex()
+
+        requests = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "load_skill", "arguments": {"name": "multi-sec", "section": "Physics Audit"}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "load_skill", "arguments": {"name": "multi-sec", "section": "output"}}},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "load_skill", "arguments": {"name": "multi-sec", "section": "Missing Section"}}},
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "load_skill", "arguments": {"name": "multi-sec", "start_line": 6, "end_line": 8}}},
+            {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "load_skill", "arguments": {"name": "multi-sec", "file": "scripts/tool.py", "start_line": 2, "end_line": 3}}},
+        ]
+        resps = self._communicate_mcp_newline(requests, base_dir=rt_base)
+        by_id = {r["id"]: r["result"] for r in resps}
+
+        # 1. Exact heading match includes nested ### subsection and stops before next ## heading; reports runtime_dir
+        t1 = by_id[1]["content"][0]["text"]
+        self.assertFalse(by_id[1]["isError"])
+        self.assertIn(f"Directory: {rt_dir.resolve()}", t1)
+        self.assertIn(f"Archive Directory: {arch_dir.resolve()}", t1)
+        self.assertIn("Section: Physics Audit", t1)
+        self.assertIn("Audit line A", t1)
+        self.assertIn("Sub Remediation", t1)
+        self.assertNotIn("Final summary", t1)
+
+        # 2. Substring case-insensitive heading match
+        t2 = by_id[2]["content"][0]["text"]
+        self.assertFalse(by_id[2]["isError"])
+        self.assertIn("Section: Output Format", t2)
+        self.assertIn("Final summary", t2)
+
+        # 3. Missing section returns error + available headings
+        t3 = by_id[3]["content"][0]["text"]
+        self.assertTrue(by_id[3]["isError"])
+        self.assertIn("Available headings:", t3)
+        self.assertIn("Physics Audit", t3)
+
+        # 4. Line-range read on SKILL.md
+        t4 = by_id[4]["content"][0]["text"]
+        self.assertFalse(by_id[4]["isError"])
+        self.assertIn("Lines: 6-8", t4)
+
+        # 5. Companion file reads from runtime_dir first and slices line range
+        t5 = by_id[5]["content"][0]["text"]
+        self.assertFalse(by_id[5]["isError"])
+        self.assertIn("rt_line2\nrt_line3", t5)
+        self.assertNotIn("rt_line4", t5)
+
     # --- CLI Commands: recategorize --auto, dedupe, route, stats, setup -> uninstall ---
 
     def test_recategorize_auto_and_dedupe(self):
@@ -537,6 +613,83 @@ class TestHooksAndMCP(unittest.TestCase):
 
         idx = json.loads((dedupe_base / "skill_archive" / "search_index.json").read_text(encoding="utf-8"))
         self.assertEqual(len(idx["skills"]), 4)
+
+    def test_sync_runtime_in_place_and_verify_compat_fix(self):
+        """sync keeps path-dependent companions in place (pruning SKILL.md only) and verify --compat --fix repairs broken L2 skills."""
+        compat_base = Path(self.tmp.name) / "compat_vault"
+        compat_base.mkdir(parents=True, exist_ok=True)
+        cmgr = SkillVault(base_dir=str(compat_base))
+        cmgr.init()
+
+        # 1. Mock active plugin with path-dependent launcher script (..\..\..)
+        gh_skill = compat_base / "plugins" / "gh-mock" / "skills" / "gh-mock"
+        (gh_skill / "scripts").mkdir(parents=True, exist_ok=True)
+        (gh_skill / "SKILL.md").write_text(
+            "---\nname: gh-mock\ndescription: Mock GitHub CLI launcher.\n---\n# gh-mock\nRun scripts/gh.cmd.\n",
+            encoding="utf-8",
+        )
+        (gh_skill / "scripts" / "gh.cmd").write_text(
+            '@echo off\nfor %%I in ("%~dp0..\\..\\..") do set "PLUGIN_DIR_NAME=%%~nxI"\n',
+            encoding="utf-8",
+        )
+
+        # Dry run previews runtime-in-place without mutating files
+        self.assertEqual(cmgr.sync(dry_run=True), 0)
+        self.assertTrue((gh_skill / "SKILL.md").exists())
+
+        # Live sync vaults full skill into L2, prunes ONLY SKILL.md from L1, and keeps scripts/gh.cmd
+        self.assertEqual(cmgr.sync(dry_run=False), 0)
+        self.assertFalse((gh_skill / "SKILL.md").exists())
+        self.assertTrue((gh_skill / "scripts" / "gh.cmd").exists())
+        self.assertTrue((compat_base / "skill_archive" / "skills" / "gh-mock" / "SKILL.md").exists())
+
+        m_map = {m["name"]: m for m in cmgr.load_manifest()}
+        self.assertEqual(m_map["gh-mock"].get("relocation_mode"), "runtime_in_place")
+        self.assertTrue(m_map["gh-mock"].get("runtime_dir"))
+
+        # verify --compat passes cleanly for gh-mock
+        self.assertEqual(cmgr.verify(compat=True), 0)
+
+        # 2. Simulate pre-existing broken L2 path-dependent skill whose L1 folder was fully deleted
+        (compat_base / "plugins" / "db-mock").mkdir(parents=True, exist_ok=True)
+        db_arch = compat_base / "skill_archive" / "skills" / "db-mock"
+        (db_arch / "scripts").mkdir(parents=True, exist_ok=True)
+        (db_arch / "SKILL.md").write_text(
+            "---\nname: db-mock\ndescription: Mock DB tool.\n---\n# db-mock\nRun scripts/run.js.\n",
+            encoding="utf-8",
+        )
+        (db_arch / "scripts" / "run.js").write_text(
+            "const path = require('path');\nconst p = path.resolve(__dirname, '../../../.env');\n",
+            encoding="utf-8",
+        )
+        manifest = cmgr.load_manifest()
+        manifest.append({
+            "name": "db-mock",
+            "category": "Cloud SQL",
+            "original_path": "plugins/db-mock/skills/db-mock",
+            "archived_path": "skill_archive/skills/db-mock",
+        })
+        cmgr.save_manifest(manifest)
+        cmgr.reindex()
+
+        # verify --compat detects db-mock as broken and returns 1
+        self.assertEqual(cmgr.verify(compat=True, fix=False), 1)
+
+        # verify --compat --fix materializes scripts/run.js WITHOUT recreating SKILL.md and returns 0
+        self.assertEqual(cmgr.verify(compat=True, fix=True), 0)
+        db_rt = compat_base / "plugins" / "db-mock" / "skills" / "db-mock"
+        self.assertTrue((db_rt / "scripts" / "run.js").exists())
+        self.assertFalse((db_rt / "SKILL.md").exists())
+
+        idx = json.loads((compat_base / "skill_archive" / "search_index.json").read_text(encoding="utf-8"))
+        idx_map = {s["name"]: s for s in idx["skills"]}
+        self.assertEqual(Path(idx_map["db-mock"]["runtime_dir"]).resolve(), db_rt.resolve())
+
+        # uninstall cleanly restores SKILL.md + scripts back to L1
+        self.assertEqual(cmgr.uninstall(keep_skill=True), 0)
+        self.assertTrue((gh_skill / "SKILL.md").exists())
+        self.assertTrue((db_rt / "SKILL.md").exists())
+        self.assertTrue((db_rt / "scripts" / "run.js").exists())
 
     def test_route_stats_and_setup_uninstall_roundtrip(self):
         """Test sandboxed setup -> PreInvocation -> stats -> route -> uninstall cleanup."""

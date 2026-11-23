@@ -10,6 +10,7 @@ import argparse
 from datetime import datetime
 import fnmatch
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -885,6 +886,191 @@ class SkillVault:
                         pass
         return protected
 
+    def _collect_bin_shim_targets(self):
+        """Read small launcher shims in antigravity/bin or base_dir/bin to detect path-bound scripts."""
+        app_data = os.environ.get("ANTIGRAVITY_APP_DATA_DIR")
+        agy_bin = (Path(app_data) / "bin") if app_data else (Path.home() / ".gemini" / "antigravity" / "bin")
+        bin_dirs = []
+        for cand in (agy_bin, self.base_dir / "bin", self.get_root_dir() / "bin"):
+            if cand.exists() and cand.is_dir():
+                res = cand.resolve()
+                if res not in bin_dirs:
+                    bin_dirs.append(res)
+
+        shims = []
+        for bdir in bin_dirs:
+            try:
+                for fp in bdir.iterdir():
+                    if not fp.is_file():
+                        continue
+                    if fp.suffix.lower() not in {".cmd", ".bat", ".sh", ""}:
+                        continue
+                    try:
+                        if fp.stat().st_size > 4096:
+                            continue
+                        txt = fp.read_text(encoding="utf-8", errors="ignore").lower()
+                        shims.append((fp.name, txt))
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+        return shims
+
+    def assess_skill_compat(self, skill_dir, original_path=None, bin_shim_targets=None, max_single_chars=None):
+        """Inspect a skill directory for path dependencies, cross-skill refs, truncation size, and guardrails."""
+        skill_dir = Path(skill_dir)
+        if max_single_chars is None:
+            max_single_chars = int(self.load_config().get("routing", {}).get("max_single_skill_chars", 9000))
+        else:
+            max_single_chars = int(max_single_chars)
+
+        companion_files = []
+        if skill_dir.exists():
+            for root, dirs, files in os.walk(skill_dir):
+                rp = Path(root)
+                dirs[:] = sorted(
+                    d for d in dirs
+                    if d not in {"__pycache__", ".git", "node_modules"}
+                    and not (rp / d / "SKILL.md").exists()
+                )
+                for fname in sorted(files):
+                    if rp == skill_dir and fname == "SKILL.md":
+                        continue
+                    companion_files.append((rp / fname).relative_to(skill_dir).as_posix())
+
+        has_companions = len(companion_files) > 0
+        skill_md = skill_dir / "SKILL.md"
+        skill_md_bytes = 0
+        md_text = ""
+        if skill_md.exists():
+            try:
+                skill_md_bytes = skill_md.stat().st_size
+                md_text = skill_md.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+        oversized_skill_md = skill_md_bytes > max_single_chars
+
+        traversal_re = re.compile(
+            r"(?:%~dp0\s*\.\.[\\/]\.\.|(?:\.\.[\\/]){2,}|"
+            r"path\.resolve\(\s*__dirname\s*,\s*['\"](?:\.\.[\\/]){2,}|\.parents\[\s*[234]\s*\])",
+            re.IGNORECASE,
+        )
+        plugin_env_re = re.compile(
+            r"\b(?:PLUGIN_DIR_NAME|CLAUDE_PLUGIN_ROOT|PLUGIN_DIR|PLUGIN_DATA|plugin_data)\b"
+        )
+        script_exts = {".py", ".js", ".ts", ".sh", ".cmd", ".bat", ".ps1", ".toml"}
+
+        path_reasons = []
+        for rel in companion_files:
+            fp = skill_dir / rel
+            if not rel.startswith("scripts/") and fp.suffix.lower() not in script_exts:
+                continue
+            try:
+                if fp.stat().st_size > 262144:
+                    continue
+                ftxt = fp.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if traversal_re.search(ftxt):
+                path_reasons.append(f"script_parent_traversal: {rel}")
+            if plugin_env_re.search(ftxt):
+                path_reasons.append(f"script_plugin_root_ref: {rel}")
+
+        if original_path and bin_shim_targets:
+            orig_fwd = str(Path(original_path)).lower().replace("\\", "/")
+            orig_bck = str(Path(original_path)).lower().replace("/", "\\")
+            for shim_name, shim_txt in bin_shim_targets:
+                for pat in (orig_fwd, orig_bck):
+                    pos = shim_txt.find(pat)
+                    if pos != -1:
+                        end_pos = pos + len(pat)
+                        if end_pos == len(shim_txt) or shim_txt[end_pos] in ("/", "\\", "\"", "'", " ", "\t", "\r", "\n"):
+                            path_reasons.append(f"path_shim_target: bin/{shim_name}")
+                            break
+
+        cross_re = re.compile(
+            r"(?:\.\./[a-zA-Z0-9._-]+(?:/[a-zA-Z0-9._-]+)*|"
+            r"\$\{?CLAUDE_PLUGIN_ROOT\}?|\$PLUGIN_DIR|<PLUGIN_DIR>|@skill:[a-zA-Z0-9._-]+)"
+        )
+        cross_skill_refs = []
+        seen_refs = set()
+        for m in cross_re.finditer(md_text):
+            val = m.group(0)
+            if val not in seen_refs:
+                seen_refs.add(val)
+                cross_skill_refs.append(val)
+                if len(cross_skill_refs) >= 15:
+                    break
+
+        if has_companions and re.search(
+            r"(?:\$\{?CLAUDE_PLUGIN_ROOT\}?|\$PLUGIN_DIR|<PLUGIN_DIR>|\.\./[a-zA-Z0-9._-]+/scripts/)",
+            md_text,
+        ):
+            path_reasons.append("skill_plugin_path_ref: SKILL.md")
+
+        # Deduplicate while preserving order
+        path_reasons = list(dict.fromkeys(path_reasons))
+
+        guard_re = re.compile(
+            r"(?:trigger:\s*always_on|MANDATORY:\s*Execute FIRST|CRITICAL RULE|STOP AND VERIFY)"
+        )
+        guardrail_signals = list(dict.fromkeys(m.group(0) for m in guard_re.finditer(md_text[:2000])))
+
+        path_dependent = bool(path_reasons)
+        needs_runtime_in_place = bool(path_dependent and has_companions)
+        return {
+            "path_dependent": path_dependent,
+            "needs_runtime_in_place": needs_runtime_in_place,
+            "has_companions": has_companions,
+            "path_reasons": path_reasons,
+            "cross_skill_refs": cross_skill_refs,
+            "oversized_skill_md": oversized_skill_md,
+            "skill_md_bytes": skill_md_bytes,
+            "guardrail_signals": guardrail_signals,
+        }
+
+    def _prune_skill_runtime_in_place(self, active_path):
+        """Remove SKILL.md only so L1 context drops to 0 while path-dependent companions stay in place."""
+        active_path = Path(active_path)
+        if not active_path.exists():
+            return False
+        skill_md = active_path / "SKILL.md"
+        if skill_md.exists():
+            skill_md.unlink()
+        try:
+            has_remaining = any(active_path.iterdir())
+        except OSError:
+            has_remaining = False
+        if not has_remaining:
+            try:
+                active_path.rmdir()
+            except OSError:
+                pass
+            return False
+        return True
+
+    def _materialize_runtime_companions(self, archived_dir, target_dir):
+        """Copy companion files from L2 to target_dir without creating SKILL.md."""
+        archived_dir = Path(archived_dir).resolve()
+        target_dir = Path(target_dir).resolve()
+        if (target_dir / "SKILL.md").exists():
+            return False
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        def _ignore_skill_md_and_nested(curr_dir, names):
+            curr_path = Path(curr_dir).resolve()
+            ignored = []
+            if curr_path == archived_dir:
+                for n in names:
+                    if n == "SKILL.md":
+                        ignored.append(n)
+                    elif (curr_path / n).is_dir() and (curr_path / n / "SKILL.md").exists():
+                        ignored.append(n)
+            return ignored
+
+        shutil.copytree(archived_dir, target_dir, dirs_exist_ok=True, ignore=_ignore_skill_md_and_nested)
+        return True
+
     def make_portable_path(self, abs_path):
         """Convert path to relative from base_dir or root_dir if possible."""
         resolved = Path(abs_path).resolve()
@@ -1223,6 +1409,7 @@ class SkillVault:
 
         core_set = self.get_core_skills(protect_skills)
         hook_protected = self.get_hook_protected_skills()
+        bin_shims = self._collect_bin_shim_targets()
 
         active_skills = self.get_active_skills()
         manifest = self.load_manifest()
@@ -1271,7 +1458,12 @@ class SkillVault:
             elif is_hook_dep:
                 protected_hooks.append(name)
             elif not keep_active:
-                to_prune.append((name, data))
+                compat = (
+                    self.assess_skill_compat(active_path, original_path=active_path, bin_shim_targets=bin_shims)
+                    if not data.get("single_skill_dir")
+                    else {"needs_runtime_in_place": False, "path_reasons": []}
+                )
+                to_prune.append((name, data, compat))
 
         print("Scan Results:")
         print(f"  * New skills to ingest into vault:     {len(to_ingest_new)}")
@@ -1289,8 +1481,11 @@ class SkillVault:
             for name in sorted(protected_hooks):
                 print(f"    [Protected (Hook Dependency)] {name}")
         print(f"  * Non-core active skills to prune:     {len(to_prune)}")
-        for name, _ in to_prune:
-            print(f"    [PRUNE] {name} (Will be removed from active context to prevent context bloat)")
+        for name, data, compat in to_prune:
+            if compat.get("needs_runtime_in_place"):
+                print(f"    [PRUNE (Runtime-in-Place)] {name} (Remove SKILL.md only; keep scripts at {data['path']})")
+            else:
+                print(f"    [PRUNE] {name} (Will be removed from active context to prevent context bloat)")
         print("")
 
         if dry_run:
@@ -1324,7 +1519,7 @@ class SkillVault:
             }
             total_ingested += 1
 
-        for name, data in to_prune:
+        for name, data, compat in to_prune:
             active_path = Path(data["path"])
             if data.get("single_skill_dir"):
                 for sub in active_path.iterdir():
@@ -1335,6 +1530,18 @@ class SkillVault:
                     else:
                         sub.unlink()
                 print(f"[Pruned] Emptied single-skill directory: {active_path}")
+            elif compat.get("needs_runtime_in_place"):
+                kept_rt = self._prune_skill_runtime_in_place(active_path)
+                if kept_rt and name in manifest_map:
+                    manifest_map[name]["runtime_dir"] = self.make_portable_path(active_path)
+                    manifest_map[name]["relocation_mode"] = "runtime_in_place"
+                    reasons_str = ", ".join(compat.get("path_reasons", [])[:3])
+                    print(
+                        f"[Pruned (Runtime-in-Place)] Removed SKILL.md only; kept companion files at: "
+                        f"{active_path} ({reasons_str})"
+                    )
+                else:
+                    print(f"[Pruned] Removed active folder: {active_path}")
             else:
                 if active_path.exists():
                     shutil.rmtree(active_path)
@@ -1441,6 +1648,7 @@ class SkillVault:
         manifest = self.load_manifest()
         manifest_map = {item["name"]: item for item in manifest}
         hook_protected = self.get_hook_protected_skills()
+        bin_shims = self._collect_bin_shim_targets()
 
         skills_to_archive = []
         if name:
@@ -1475,8 +1683,16 @@ class SkillVault:
                         if skill_name in hook_protected:
                             print(f"[Protected (Hook Dependency)] Preserving active '{skill_name}' (referenced by plugin hooks/MCP; use --force to override)")
                         else:
-                            shutil.rmtree(active_path)
-                            print(f"[Cleaned] Removed older active directory: {active_path}")
+                            compat = self.assess_skill_compat(active_path, original_path=active_path, bin_shim_targets=bin_shims)
+                            if compat.get("needs_runtime_in_place"):
+                                kept_rt = self._prune_skill_runtime_in_place(active_path)
+                                if kept_rt and skill_name in manifest_map:
+                                    manifest_map[skill_name]["runtime_dir"] = self.make_portable_path(active_path)
+                                    manifest_map[skill_name]["relocation_mode"] = "runtime_in_place"
+                                    print(f"[Cleaned (Runtime-in-Place)] Removed SKILL.md only; kept companion files at: {active_path}")
+                            else:
+                                shutil.rmtree(active_path)
+                                print(f"[Cleaned] Removed older active directory: {active_path}")
                     continue
                 elif recency > 0:
                     print(f"[Archived] Overwriting older L2 archive with newer active L1 version: {active_path} -> {dest_dir}")
@@ -1508,8 +1724,16 @@ class SkillVault:
                 if skill_name in hook_protected and not force:
                     print(f"[Protected (Hook Dependency)] Preserving active '{skill_name}' (referenced by plugin hooks/MCP; use --force to override)")
                 else:
-                    shutil.rmtree(active_path)
-                    print(f"[Cleaned] Removed active directory: {active_path}")
+                    compat = self.assess_skill_compat(active_path, original_path=active_path, bin_shim_targets=bin_shims)
+                    if compat.get("needs_runtime_in_place") and not force:
+                        kept_rt = self._prune_skill_runtime_in_place(active_path)
+                        if kept_rt:
+                            manifest_map[skill_name]["runtime_dir"] = self.make_portable_path(active_path)
+                            manifest_map[skill_name]["relocation_mode"] = "runtime_in_place"
+                            print(f"[Cleaned (Runtime-in-Place)] Removed SKILL.md only; kept companion files at: {active_path}")
+                    else:
+                        shutil.rmtree(active_path)
+                        print(f"[Cleaned] Removed active directory: {active_path}")
 
         self.save_manifest(list(manifest_map.values()))
         self.reindex()
@@ -1920,12 +2144,20 @@ class SkillVault:
             if archived_path.exists() and (archived_path / "SKILL.md").exists():
                 folder_name = archived_path.name
                 if folder_name not in manifest_by_folder or item.get("name") == folder_name:
-                    manifest_by_folder[folder_name] = {
+                    entry = {
                         "name": folder_name,
                         "category": item.get("category") or "General & Utility Skills",
                         "original_path": item.get("original_path", self.make_portable_path(self.skills_dir / folder_name)),
                         "archived_path": self.make_portable_path(archived_path),
                     }
+                    if item.get("runtime_dir"):
+                        rt_path = self.resolve_original_path(item["runtime_dir"], skill_name=folder_name)
+                        if not rt_path.exists():
+                            rt_path = self.resolve_portable_path(item["runtime_dir"])
+                        if rt_path.exists() and rt_path.is_dir() and not (rt_path / "SKILL.md").exists():
+                            entry["runtime_dir"] = item["runtime_dir"]
+                            entry["relocation_mode"] = item.get("relocation_mode") or "runtime_in_place"
+                    manifest_by_folder[folder_name] = entry
 
         disk_skills = self.get_archived_skill_folders()
         for name, data in disk_skills.items():
@@ -2241,108 +2473,312 @@ class SkillVault:
                 print(f"  * {rc}")
             print("")
 
-    def verify(self, fix=False):
-        """Perform a comprehensive bi-directional integrity check across Disk, Manifest, and INDEX.md."""
-        print("==================================================")
-        print("       SKILL VAULT INTEGRITY AUDIT")
-        print(f"  Base Directory: {self.base_dir}")
-        print(f"  Archive Store:  {self.archive_dir}")
-        print("==================================================\n")
+    def verify(self, fix=False, compat=False, as_json=False):
+        """Perform a bi-directional integrity check and optional L2 compatibility audit."""
+        if not as_json:
+            print("==================================================")
+            print("       SKILL VAULT INTEGRITY AUDIT")
+            print(f"  Base Directory: {self.base_dir}")
+            print(f"  Archive Store:  {self.archive_dir}")
+            print("==================================================\n")
 
-        disk_skills = self.get_archived_skill_folders()
-        manifest = self.load_manifest()
-        manifest_map = {m["name"]: m for m in manifest}
-        indexed_skills = self.parse_index_file()
+        def _audit_integrity():
+            disk_skills_local = self.get_archived_skill_folders()
+            manifest_local = self.load_manifest()
+            manifest_map_local = {m["name"]: m for m in manifest_local}
+            indexed_local = self.parse_index_file()
 
-        issues = []
-        warnings = []
+            issues_local = []
+            warnings_local = []
 
-        for name, d in disk_skills.items():
-            if not d["has_skill_md"]:
-                issues.append(f"[Disk Error] Folder '{name}' in archive is missing SKILL.md")
-            elif d["size"] == 0:
-                issues.append(f"[Disk Error] SKILL.md in '{name}' is 0 bytes (empty file)")
+            for name, d in disk_skills_local.items():
+                if not d["has_skill_md"]:
+                    issues_local.append(f"[Disk Error] Folder '{name}' in archive is missing SKILL.md")
+                elif d["size"] == 0:
+                    issues_local.append(f"[Disk Error] SKILL.md in '{name}' is 0 bytes (empty file)")
 
-        disk_names = set(disk_skills.keys())
-        manifest_names = set(manifest_map.keys())
+            disk_names = set(disk_skills_local.keys())
+            manifest_names = set(manifest_map_local.keys())
 
-        unmanifested_disk = disk_names - manifest_names
-        if unmanifested_disk:
-            for name in sorted(unmanifested_disk):
-                issues.append(f"[Uncataloged on Disk] '{name}' exists in archive folder but NOT in backup_manifest.json")
+            for name in sorted(disk_names - manifest_names):
+                issues_local.append(f"[Uncataloged on Disk] '{name}' exists in archive folder but NOT in backup_manifest.json")
+            for name in sorted(manifest_names - disk_names):
+                issues_local.append(f"[Phantom Manifest Entry] '{name}' listed in backup_manifest.json but NOT found on disk")
 
-        phantom_manifest = manifest_names - disk_names
-        if phantom_manifest:
-            for name in sorted(phantom_manifest):
-                issues.append(f"[Phantom Manifest Entry] '{name}' listed in backup_manifest.json but NOT found on disk")
+            for item in manifest_local:
+                name = item["name"]
+                archived_path = self.resolve_portable_path(item.get("archived_path", ""))
+                if not archived_path.exists():
+                    issues_local.append(f"[Broken Manifest Path] '{name}' archived_path does not exist: {archived_path}")
+                elif not (archived_path / "SKILL.md").exists():
+                    issues_local.append(f"[Missing SKILL.md] '{name}' archived_path has no SKILL.md: {archived_path}")
+                if not item.get("category"):
+                    warnings_local.append(f"[Missing Category] '{name}' in manifest has no category assigned")
+
+            index_names = set(indexed_local.keys())
+            for name in sorted(disk_names - index_names):
+                issues_local.append(f"[Unindexed on Disk] '{name}' exists on disk but is NOT listed in INDEX.md")
+            for name in sorted(index_names - disk_names):
+                issues_local.append(f"[Phantom Index Entry] '{name}' listed in INDEX.md but does NOT exist on disk")
+            for name in sorted(manifest_names - index_names):
+                issues_local.append(f"[Manifest/Index Mismatch] '{name}' is in backup_manifest.json but NOT in INDEX.md")
+
+            for name, data in indexed_local.items():
+                link_path_str = data.get("link_path")
+                if link_path_str and not link_path_str.startswith("file:///"):
+                    target_file = (self.archive_dir / link_path_str).resolve()
+                    if not target_file.exists():
+                        issues_local.append(f"[Broken Index Link] '{name}' link target missing: {target_file}")
+
+            return disk_skills_local, manifest_local, indexed_local, issues_local, warnings_local
+
+        disk_skills, manifest, indexed_skills, issues, warnings = _audit_integrity()
+
+        if not as_json:
+            print("Component Counts:")
+            print(f"  * Physical Folders on Disk:        {len(disk_skills)}")
+            print(f"  * Entries in backup_manifest.json: {len(manifest)}")
+            print(f"  * Entries in INDEX.md:             {len(indexed_skills)}\n")
+
+            if not issues and not warnings and not compat:
+                print("[OK] 100% Integrity Verified! Disk, manifest, and index are in perfect sync.\n")
+                return 0
+
+            if warnings:
+                print(f"Warnings ({len(warnings)}):")
+                for w in warnings:
+                    print(f"  [!] {w}")
+                print("")
+
+            if issues:
+                print(f"Discrepancies / Errors ({len(issues)}):")
+                for iss in issues:
+                    print(f"  [X] {iss}")
+                print("")
+
+        integrity_repaired = False
+        if issues and fix:
+            if not as_json:
+                print("[Self-Healing] Applying automatic repairs (--fix enabled)...")
+            self.reindex()
+            integrity_repaired = True
+            if not as_json:
+                print("[Self-Healing] Reindexed and resynchronized successfully.\n")
+            if not compat and not as_json:
+                return 0
+            disk_skills, manifest, indexed_skills, issues, warnings = _audit_integrity()
+
+        if not compat:
+            if as_json:
+                print(
+                    json.dumps(
+                        {
+                            "counts": {
+                                "disk": len(disk_skills),
+                                "manifest": len(manifest),
+                                "index": len(indexed_skills),
+                            },
+                            "issues": issues,
+                            "warnings": warnings,
+                            "integrity_repaired": integrity_repaired,
+                            "ok": not issues,
+                        },
+                        indent=2,
+                    )
+                )
+                return 0 if not issues else 1
+            if issues:
+                print("Tip: Run with '--fix' (e.g. 'python skill_vault.py verify --fix') to automatically repair discrepancies.\n")
+                return 1
+            return 0
+
+        # Compatibility audit across vaulted skills
+        bin_shims = self._collect_bin_shim_targets()
+        active_skills = self.get_active_skills()
+        base_res = self.base_dir.resolve()
+        root_res = self.get_root_dir().resolve()
+
+        def _can_safely_materialize(orig_path):
+            orig_res = Path(orig_path).resolve()
+            anchor = None
+            rel_parts = ()
+            for cand_anchor in (base_res, root_res):
+                try:
+                    rel = orig_res.relative_to(cand_anchor)
+                    anchor = cand_anchor
+                    rel_parts = rel.parts
+                    break
+                except ValueError:
+                    continue
+            if anchor is None or (orig_res / "SKILL.md").exists():
+                return False
+            if len(rel_parts) >= 2 and rel_parts[0].lower() == "plugins":
+                plugin_dir = anchor / rel_parts[0] / rel_parts[1]
+                if not plugin_dir.exists() or not plugin_dir.is_dir():
+                    return False
+            return True
+
+        path_dependent_broken = []
+        runtime_in_place_active = []
+        cross_skill_refs = []
+        oversized = []
+        vaulted_guardrails = []
 
         for item in manifest:
             name = item["name"]
             archived_path = self.resolve_portable_path(item.get("archived_path", ""))
-            if not archived_path.exists():
-                issues.append(f"[Broken Manifest Path] '{name}' archived_path does not exist: {archived_path}")
-            elif not (archived_path / "SKILL.md").exists():
-                issues.append(f"[Missing SKILL.md] '{name}' archived_path has no SKILL.md: {archived_path}")
+            if not (archived_path / "SKILL.md").exists():
+                continue
+            orig_path = self.resolve_original_path(item.get("original_path", ""), skill_name=name)
+            is_active_l1 = (orig_path / "SKILL.md").exists() or (name in active_skills)
 
-            if not item.get("category"):
-                warnings.append(f"[Missing Category] '{name}' in manifest has no category assigned")
+            info = self.assess_skill_compat(archived_path, original_path=orig_path, bin_shim_targets=bin_shims)
 
-        index_names = set(indexed_skills.keys())
-        unindexed_disk = disk_names - index_names
-        if unindexed_disk:
-            for name in sorted(unindexed_disk):
-                issues.append(f"[Unindexed on Disk] '{name}' exists on disk but is NOT listed in INDEX.md")
+            rt_ok = False
+            rt_path = None
+            if item.get("runtime_dir"):
+                rt_path = self.resolve_original_path(item["runtime_dir"], skill_name=name)
+                if not rt_path.exists():
+                    rt_path = self.resolve_portable_path(item["runtime_dir"])
+                try:
+                    rt_ok = (
+                        rt_path.exists()
+                        and rt_path.is_dir()
+                        and not (rt_path / "SKILL.md").exists()
+                        and any(rt_path.iterdir())
+                    )
+                except OSError:
+                    rt_ok = False
 
-        phantom_index = index_names - disk_names
-        if phantom_index:
-            for name in sorted(phantom_index):
-                issues.append(f"[Phantom Index Entry] '{name}' listed in INDEX.md but does NOT exist on disk")
-
-        unindexed_manifest = manifest_names - index_names
-        if unindexed_manifest:
-            for name in sorted(unindexed_manifest):
-                issues.append(f"[Manifest/Index Mismatch] '{name}' is in backup_manifest.json but NOT in INDEX.md")
-
-        for name, data in indexed_skills.items():
-            link_path_str = data.get("link_path")
-            if link_path_str:
-                if link_path_str.startswith("file:///"):
-                    pass
+            if info["needs_runtime_in_place"] and not is_active_l1:
+                if rt_ok:
+                    runtime_in_place_active.append({
+                        "name": name,
+                        "runtime_dir": str(rt_path),
+                        "reasons": info["path_reasons"],
+                    })
                 else:
-                    target_file = (self.archive_dir / link_path_str).resolve()
-                    if not target_file.exists():
-                        issues.append(f"[Broken Index Link] '{name}' link target missing: {target_file}")
+                    path_dependent_broken.append({
+                        "name": name,
+                        "item": item,
+                        "archived_path": archived_path,
+                        "orig_path": orig_path,
+                        "reasons": info["path_reasons"],
+                    })
 
-        print("Component Counts:")
-        print(f"  * Physical Folders on Disk:        {len(disk_skills)}")
-        print(f"  * Entries in backup_manifest.json: {len(manifest)}")
-        print(f"  * Entries in INDEX.md:             {len(indexed_skills)}\n")
+            if info["cross_skill_refs"]:
+                cross_skill_refs.append({"name": name, "refs": info["cross_skill_refs"]})
+            if info["oversized_skill_md"]:
+                oversized.append({"name": name, "bytes": info["skill_md_bytes"]})
+            if info["guardrail_signals"] and not is_active_l1:
+                vaulted_guardrails.append({"name": name, "signals": info["guardrail_signals"]})
 
-        if not issues and not warnings:
-            print("[OK] 100% Integrity Verified! Disk, manifest, and index are in perfect sync.\n")
-            return 0
+        repaired_compat = []
+        remaining_broken = []
+        if fix and path_dependent_broken:
+            for entry in path_dependent_broken:
+                orig_path = entry["orig_path"]
+                if _can_safely_materialize(orig_path):
+                    self._materialize_runtime_companions(entry["archived_path"], orig_path)
+                    entry["item"]["runtime_dir"] = self.make_portable_path(orig_path)
+                    entry["item"]["relocation_mode"] = "runtime_in_place"
+                    repaired_compat.append({"name": entry["name"], "runtime_dir": str(orig_path)})
+                    runtime_in_place_active.append({
+                        "name": entry["name"],
+                        "runtime_dir": str(orig_path),
+                        "reasons": entry["reasons"],
+                    })
+                else:
+                    remaining_broken.append(entry)
+            if repaired_compat:
+                self.save_manifest(manifest)
+                if not as_json:
+                    self.reindex()
+                else:
+                    old_stdout = sys.stdout
+                    sys.stdout = io.StringIO()
+                    try:
+                        self.reindex()
+                    finally:
+                        sys.stdout = old_stdout
+        else:
+            remaining_broken = path_dependent_broken
 
-        if warnings:
-            print(f"Warnings ({len(warnings)}):")
-            for w in warnings:
-                print(f"  [!] {w}")
-            print("")
+        remaining_broken_pub = [
+            {"name": e["name"], "original_path": str(e["orig_path"]), "reasons": e["reasons"]}
+            for e in remaining_broken
+        ]
 
-        if issues:
-            print(f"Discrepancies / Errors ({len(issues)}):")
-            for iss in issues:
-                print(f"  [X] {iss}")
-            print("")
+        if as_json:
+            print(
+                json.dumps(
+                    {
+                        "counts": {
+                            "disk": len(disk_skills),
+                            "manifest": len(manifest),
+                            "index": len(indexed_skills),
+                        },
+                        "issues": issues,
+                        "warnings": warnings,
+                        "integrity_repaired": integrity_repaired,
+                        "compat": {
+                            "path_dependent_broken": remaining_broken_pub,
+                            "runtime_in_place_active": runtime_in_place_active,
+                            "repaired": repaired_compat,
+                            "cross_skill_refs": cross_skill_refs,
+                            "oversized": oversized,
+                            "vaulted_guardrails": vaulted_guardrails,
+                        },
+                        "ok": (not issues) and (not remaining_broken_pub),
+                    },
+                    indent=2,
+                )
+            )
+            return 0 if (not issues and not remaining_broken_pub) else 1
 
-            if fix:
-                print("[Self-Healing] Applying automatic repairs (--fix enabled)...")
-                self.reindex()
-                print("[Self-Healing] Reindexed and resynchronized successfully.\n")
-                return 0
-            else:
-                print("Tip: Run with '--fix' (e.g. 'python skill_vault.py verify --fix') to automatically repair discrepancies.\n")
-                return 1
+        print("==================================================")
+        print("       L2 COMPATIBILITY AUDIT SUMMARY")
+        print("==================================================")
+        print(f"  * Path-Dependent Skills Missing Runtime-in-Place: {len(remaining_broken_pub)}")
+        for e in remaining_broken_pub:
+            print(f"    [X] {e['name']} -> {e['original_path']} ({', '.join(e['reasons'][:3])})")
 
+        if repaired_compat:
+            print(f"  * Materialized Runtime-in-Place (--fix):          {len(repaired_compat)}")
+            for r in repaired_compat:
+                print(f"    [FIXED] {r['name']} -> {r['runtime_dir']} (companions restored without SKILL.md)")
+
+        print(f"  * Runtime-in-Place Protected Skills:              {len(runtime_in_place_active)}")
+        for r in runtime_in_place_active[:10]:
+            print(f"    [OK] {r['name']} -> {r['runtime_dir']}")
+        if len(runtime_in_place_active) > 10:
+            print(f"    ... (+{len(runtime_in_place_active) - 10} more)")
+
+        print(f"  * Cross-Skill / Plugin References:                {len(cross_skill_refs)}")
+        for c in cross_skill_refs[:10]:
+            print(f"    [!] {c['name']}: {', '.join(c['refs'][:4])}")
+        if len(cross_skill_refs) > 10:
+            print(f"    ... (+{len(cross_skill_refs) - 10} more)")
+
+        print(f"  * Oversized SKILL.md (truncated on inline):       {len(oversized)}")
+        for o in sorted(oversized, key=lambda x: -x["bytes"])[:10]:
+            print(f"    [!] {o['name']}: {o['bytes']} bytes")
+        if len(oversized) > 10:
+            print(f"    ... (+{len(oversized) - 10} more)")
+
+        print(f"  * Vaulted Always-On / Guardrail Skills:           {len(vaulted_guardrails)}")
+        for g in vaulted_guardrails[:10]:
+            print(f"    [!] {g['name']}: {', '.join(g['signals'])}")
+        if len(vaulted_guardrails) > 10:
+            print(f"    ... (+{len(vaulted_guardrails) - 10} more)")
+        print("")
+
+        if remaining_broken_pub and not fix:
+            print("Tip: Run with '--compat --fix' to materialize runtime-in-place companion files without L1 SKILL.md bloat.\n")
+
+        if issues or remaining_broken_pub:
+            return 1
+        print("[OK] L2 Compatibility Audit passed with no unresolved path-dependent skills.\n")
         return 0
 
     def search(self, query, category=None, limit=10, as_json=False):
@@ -3375,8 +3811,10 @@ def main():
     p_idx = subparsers.add_parser("reindex", help="Rebuild INDEX.md, search_index.json, and sync manifest")
 
     # Verify / Integrity Check
-    p_ver = subparsers.add_parser("verify", help="Verify archive integrity across disk, manifest, and index")
+    p_ver = subparsers.add_parser("verify", help="Verify archive integrity and L2 compatibility")
     p_ver.add_argument("--fix", action="store_true", help="Automatically repair any detected discrepancies")
+    p_ver.add_argument("--compat", action="store_true", help="Audit L2 compatibility (path dependencies, cross-skill refs, oversized SKILL.md, guardrails)")
+    p_ver.add_argument("--json", action="store_true", help="Output structured JSON")
 
     # Search
     p_srch = subparsers.add_parser("search", help="Search archived skills by keyword, intent, or domain")
@@ -3508,7 +3946,7 @@ def main():
     elif args.command == "reindex":
         mgr.reindex()
     elif args.command == "verify":
-        sys.exit(mgr.verify(fix=args.fix))
+        sys.exit(mgr.verify(fix=args.fix, compat=args.compat, as_json=args.json))
     elif args.command == "search":
         mgr.search(query=args.query, category=args.category, limit=args.limit, as_json=args.json)
     elif args.command == "route":

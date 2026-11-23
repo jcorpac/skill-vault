@@ -89,7 +89,7 @@ python scripts/skill_vault.py verify --fix
 | `skill-vault import <name>` | Copy vaulted skills into a project's `.agents/skills` or `skills/` directory. |
 | `skill-vault optimize` | Prune/mount active skills using workspace file fingerprints. |
 | `skill-vault config` | Inspect or customize core skills, fingerprints, category rules, and `--set-routing` thresholds. |
-| `skill-vault reindex` / `verify` | Rebuild `INDEX.md` + `search_index.json` and audit archive integrity. |
+| `skill-vault reindex` / `verify` | Rebuild `INDEX.md` + `search_index.json` and audit archive integrity or L2 compatibility (`--compat --fix`, including runtime-in-place protection). |
 | `skill-vault uninstall` | Safely restore all archived skills to L1 and remove Skill Vault wiring & files (`eject` alias). |
 
 ---

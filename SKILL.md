@@ -12,13 +12,13 @@ description: >-
 **Skill Vault** keeps active L1 context minimal (core skills only) while preserving instant, zero-approval access to all vaulted L2 domain skills:
 
 1. **Background Lifecycle Hooks (Primary Path)**:
-   - `SessionStart` incrementally syncs newly installed/updated plugin skills, refreshes `search_index.json`, and warms workspace stack fingerprints.
-   - `PreInvocation` / `UserPromptSubmit` / `BeforeAgent` scores the user prompt via a pre-built BM25 + multi-signal index (`<100ms`), injects top high-confidence skills or compact pointers directly from L2, and injects **0 tokens** on unrelated turns.
+   - `SessionStart` incrementally syncs newly installed/updated plugin skills, refreshes `search_index.json`, and caches workspace fingerprints.
+   - `PreInvocation` / `UserPromptSubmit` / `BeforeAgent` scores prompts via BM25 (<100ms), injects top skills/pointers from L2, and adds **0 tokens** on unrelated turns.
 2. **Read-Only MCP Fallback (Mid-Turn Discovery)**:
    - If a task pivots mid-turn to a specialized domain not present in context, call the `skill-vault` MCP tools:
      - `list_skills(category?, include_descriptions?)` — List all vaulted L2 skill names grouped by category in one call.
      - `search_skills(query, category?, limit?, offset?)` — Search vaulted L2 skills by keyword, intent, or list categories.
-     - `load_skill(name, file?)` — Read a vaulted skill's `SKILL.md` or any companion file (`references/`, `scripts/`, `examples/`).
+     - `load_skill(name, file?, section?, start_line?)` — Read a skill's `SKILL.md` (full, section, or lines) or companion file.
    - Never mutate L1 active directories or run shell commands solely to browse archived skills when MCP tools are available.
 
 ---
@@ -38,7 +38,7 @@ skill-vault search "<query>" [--category "<Category>"] [--limit 10]
 # Inspect background routing telemetry (0-token turn rate, latency, top skills)
 skill-vault stats [--limit 100]
 
-# Scan plugins/active directories, ingest updates, and prune non-core skills (respects hook dependencies)
+# Scan plugins/active dirs, ingest updates, and prune non-core skills
 skill-vault sync [--dry-run] [--keep-active]
 
 # Re-classify 'General & Utility Skills' using built-in + custom rules
@@ -56,6 +56,6 @@ skill-vault config --set-routing show_ui_notice true
 skill-vault archive <name> --category "<Category>"
 skill-vault restore <name>
 skill-vault import <name> --dest "./.agents/skills"
-skill-vault verify --fix
+skill-vault verify [--compat] [--fix]
 skill-vault uninstall [--dry-run]
 ```

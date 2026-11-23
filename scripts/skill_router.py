@@ -503,6 +503,24 @@ def build_search_index(archive_dir, manifest, base_dir=None, resolve_path_fn=Non
         entry["resolved_path"] = str(skill_dir)
         entry["aliases"] = [name]
 
+        raw_rt = item.get("runtime_dir")
+        if raw_rt:
+            rt_cand = None
+            if resolve_path_fn is not None:
+                rt_cand = Path(resolve_path_fn(raw_rt))
+            else:
+                p_rt = Path(raw_rt)
+                if p_rt.is_absolute():
+                    rt_cand = p_rt
+                elif base_dir is not None and (Path(base_dir) / p_rt).exists():
+                    rt_cand = (Path(base_dir) / p_rt).resolve()
+                else:
+                    rt_cand = _resolve_archived_skill_dir(base_dir, archive_path, raw_rt)
+            if rt_cand and rt_cand.exists() and rt_cand.is_dir():
+                entry["runtime_dir"] = str(rt_cand.resolve())
+                if not entry.get("companion_files"):
+                    entry["companion_files"] = _list_companion_files(rt_cand)
+
         ckey = entry["canonical_key"]
         if ckey not in deduped:
             deduped[ckey] = entry
@@ -665,6 +683,7 @@ def search_index(
                 "description": entry.get("description", ""),
                 "archived_path": entry.get("archived_path", ""),
                 "resolved_path": entry.get("resolved_path", ""),
+                "runtime_dir": entry.get("runtime_dir", ""),
                 "skill_md_bytes": entry.get("skill_md_bytes", 0),
                 "companion_files": entry.get("companion_files", []),
                 "aliases": entry.get("aliases", [entry["name"]]),
@@ -825,6 +844,7 @@ def search_index(
                 "description": entry.get("description", ""),
                 "archived_path": entry.get("archived_path", ""),
                 "resolved_path": entry.get("resolved_path", ""),
+                "runtime_dir": entry.get("runtime_dir", ""),
                 "skill_md_bytes": entry.get("skill_md_bytes", 0),
                 "companion_files": entry.get("companion_files", []),
                 "aliases": entry.get("aliases", [entry["name"]]),
@@ -851,19 +871,89 @@ def _resolve_skill_md_for_candidate(cand, archive_dir, base_dir=None):
     return None, None
 
 
+def _extract_markdown_headings(text, max_headings=12):
+    """Extract top-level (h1-h3) Markdown headings outside fenced code blocks."""
+    headings = []
+    seen = set()
+    in_fence = False
+    fence_marker = None
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            if not in_fence:
+                in_fence = True
+                fence_marker = marker
+            elif marker == fence_marker:
+                in_fence = False
+                fence_marker = None
+            continue
+        if in_fence:
+            continue
+        m = re.match(r"^#{1,3}\s+(.+?)\s*#*\s*$", line)
+        if m:
+            title = " ".join(m.group(1).split())
+            if title and title.lower() not in seen:
+                seen.add(title.lower())
+                headings.append(title)
+                if len(headings) >= max_headings:
+                    break
+    return headings
+
+
 def _truncate_skill_body(text, max_chars, skill_name):
-    """Truncate overly long SKILL.md cleanly on a line boundary with MCP load hint."""
+    """Truncate overly long SKILL.md cleanly on a line boundary with omitted section outline and MCP hint."""
     if len(text) <= max_chars:
         return text, False
-    cutoff = max(max_chars - 240, 500)
+
+    total_lines = text.count("\n") + 1
+
+    def _build_notice(snippet_text):
+        shown_lines = snippet_text.count("\n") + 1
+        tail = text[len(snippet_text):]
+        omitted = _extract_markdown_headings(tail, max_headings=10)
+        if omitted:
+            parts = []
+            h_len = 0
+            for h in omitted:
+                add_len = len(h) + (2 if parts else 0)
+                if h_len + add_len > 250 and parts:
+                    parts.append("...")
+                    break
+                parts.append(h)
+                h_len += add_len
+            headings_str = ", ".join(parts)
+            return (
+                f"\n\n[... truncated at line {shown_lines}/{total_lines} ({len(snippet_text)}/{len(text)} chars) — "
+                f"OMITTED SECTIONS: {headings_str}. Call MCP load_skill(name=\"{skill_name}\", section=\"<heading>\") "
+                f"or load_skill(name=\"{skill_name}\", start_line={shown_lines + 1}) before executing omitted steps ...]"
+            )
+        return (
+            f"\n\n[... truncated at line {shown_lines}/{total_lines} ({len(snippet_text)}/{len(text)} chars); "
+            f"call MCP load_skill(name=\"{skill_name}\", start_line={shown_lines + 1}) if remaining sections are needed ...]"
+        )
+
+    cutoff = max(max_chars - 560, min(max_chars // 2, 500))
     snippet = text[:cutoff]
     last_nl = snippet.rfind("\n")
     if last_nl > cutoff * 0.6:
         snippet = snippet[:last_nl]
-    notice = (
-        f"\n\n[... truncated at {len(snippet)} chars to preserve context budget; "
-        f"call MCP load_skill(name=\"{skill_name}\") if remaining sections are needed ...]"
-    )
+
+    notice = _build_notice(snippet)
+    if len(snippet) + len(notice) > max_chars:
+        excess = len(snippet) + len(notice) - max_chars
+        new_cut = max(0, len(snippet) - excess)
+        snippet = snippet[:new_cut]
+        last_nl = snippet.rfind("\n")
+        if last_nl > new_cut * 0.5:
+            snippet = snippet[:last_nl]
+        notice = _build_notice(snippet)
+        if len(snippet) + len(notice) > max_chars:
+            snippet = snippet[: max(0, max_chars - len(notice))]
+            notice = _build_notice(snippet)
+            if len(snippet) + len(notice) > max_chars:
+                return (snippet + notice)[:max_chars], True
+
     return snippet + notice, True
 
 
@@ -963,8 +1053,15 @@ def route_prompt(
                     if raw_text:
                         budget = min(max_single_chars, remaining_chars)
                         body_text, truncated = _truncate_skill_body(raw_text, budget, cand["name"])
+                        rt_dir = cand.get("runtime_dir")
+                        effective_dir = (
+                            Path(rt_dir).resolve()
+                            if rt_dir and Path(rt_dir).exists()
+                            else skill_dir
+                        )
                         item = dict(cand)
-                        item["skill_dir"] = str(skill_dir)
+                        item["skill_dir"] = str(effective_dir)
+                        item["archive_dir"] = str(skill_dir)
                         item["skill_md_path"] = str(md_path)
                         item["content"] = body_text
                         item["truncated"] = truncated
@@ -974,7 +1071,13 @@ def route_prompt(
             if len(pointer_items) < max_pointers:
                 item = dict(cand)
                 _, skill_dir = _resolve_skill_md_for_candidate(cand, archive_dir, base_dir)
-                item["skill_dir"] = str(skill_dir) if skill_dir else cand.get("resolved_path", "")
+                rt_dir = cand.get("runtime_dir")
+                if rt_dir and Path(rt_dir).exists():
+                    item["skill_dir"] = str(Path(rt_dir).resolve())
+                    item["archive_dir"] = str(skill_dir) if skill_dir else cand.get("resolved_path", "")
+                else:
+                    item["skill_dir"] = str(skill_dir) if skill_dir else cand.get("resolved_path", "")
+                item["skill_md_path"] = str(Path(skill_dir) / "SKILL.md") if skill_dir else cand.get("archived_path", "")
                 pointer_items.append(item)
 
     if not inline_items and not pointer_items:
@@ -1010,7 +1113,9 @@ def route_prompt(
         for item in pointer_items:
             desc = item.get("description", "").strip()
             short_desc = desc[:130] + "..." if len(desc) > 130 else desc
-            skill_md_loc = str(Path(item["skill_dir"]) / "SKILL.md") if item.get("skill_dir") else item.get("archived_path", "")
+            skill_md_loc = item.get("skill_md_path") or (
+                str(Path(item["skill_dir"]) / "SKILL.md") if item.get("skill_dir") else item.get("archived_path", "")
+            )
             sections.append(
                 f'- **{item["name"]}** [{item["category"]}]: {short_desc} (`{skill_md_loc}`)'
             )

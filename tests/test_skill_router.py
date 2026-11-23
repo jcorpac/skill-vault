@@ -306,6 +306,80 @@ class TestSkillRouter(unittest.TestCase):
         finally:
             tmp.cleanup()
 
+    def test_oversized_truncation_includes_omitted_headings_and_line_hint(self):
+        """Truncated SKILL.md stays <= max_chars and lists omitted headings with section/start_line hints."""
+        intro = "# Giant Skill\n\n" + ("Intro line with context.\n" * 160)
+        tail = (
+            "\n## Step 7.3 Physics Audit\nRun audit scenarios.\n"
+            + ("Detail line.\n" * 30)
+            + "\n### Remediation Rules\nAdjust inertia.\n"
+            + "\n## Output Format\nReturn summary.\n"
+        )
+        full_text = intro + tail
+        max_chars = 3000
+        truncated_text, did_trunc = skill_router._truncate_skill_body(full_text, max_chars, "giant-skill")
+        self.assertTrue(did_trunc)
+        self.assertLessEqual(len(truncated_text), max_chars)
+        self.assertIn("OMITTED SECTIONS:", truncated_text)
+        self.assertIn("Step 7.3 Physics Audit", truncated_text)
+        self.assertIn("Remediation Rules", truncated_text)
+        self.assertIn("Output Format", truncated_text)
+        self.assertIn('section="<heading>"', truncated_text)
+        self.assertIn("start_line=", truncated_text)
+
+    def test_runtime_dir_propagates_to_search_index_and_base_dir(self):
+        """build_search_index propagates runtime_dir and route_prompt emits it as base_dir on inline skills."""
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            base = Path(tmp.name).resolve()
+            arch = base / "skill_archive"
+            mgr = SkillVault(base_dir=str(base))
+            mgr.init()
+
+            # Archived L2 folder has SKILL.md + script
+            arch_dir = arch / "skills" / "gh-cli-skill"
+            (arch_dir / "scripts").mkdir(parents=True, exist_ok=True)
+            (arch_dir / "SKILL.md").write_text(
+                "---\nname: gh-cli-skill\ndescription: Run GitHub PR workflows via gh-cli-skill.\n---\n# gh-cli-skill\nRun gh.cmd.\n",
+                encoding="utf-8",
+            )
+            (arch_dir / "scripts" / "gh.cmd").write_text("@echo off\n", encoding="utf-8")
+
+            # Runtime-in-place directory has ONLY scripts/ (no SKILL.md)
+            rt_dir = base / "plugins" / "gh-plugin" / "skills" / "gh-cli-skill"
+            (rt_dir / "scripts").mkdir(parents=True, exist_ok=True)
+            (rt_dir / "scripts" / "gh.cmd").write_text("@echo off\n", encoding="utf-8")
+
+            manifest = [{
+                "name": "gh-cli-skill",
+                "category": "Cloud & DevOps",
+                "original_path": "plugins/gh-plugin/skills/gh-cli-skill",
+                "archived_path": "skill_archive/skills/gh-cli-skill",
+                "runtime_dir": "plugins/gh-plugin/skills/gh-cli-skill",
+                "relocation_mode": "runtime_in_place",
+            }]
+            mgr.save_manifest(manifest)
+            idx = skill_router.build_search_index(
+                archive_dir=arch,
+                manifest=manifest,
+                base_dir=base,
+                resolve_path_fn=mgr.resolve_portable_path,
+            )
+            self.assertEqual(Path(idx["skills"][0]["runtime_dir"]).resolve(), rt_dir.resolve())
+
+            routed = skill_router.route_prompt(
+                index_data=idx,
+                prompt="Run gh-cli-skill pull request check",
+                archive_dir=arch,
+                base_dir=base,
+            )
+            self.assertEqual(len(routed["inline"]), 1)
+            self.assertEqual(Path(routed["inline"][0]["skill_dir"]).resolve(), rt_dir.resolve())
+            self.assertIn(f'base_dir="{rt_dir.resolve()}"', routed["injection_text"])
+            self.assertIn("Run gh.cmd.", routed["injection_text"])
+        finally:
+            tmp.cleanup()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
